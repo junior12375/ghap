@@ -86,7 +86,7 @@ export const WorkConflictInspectorModal: React.FC<WorkConflictInspectorModalProp
                   AI Work Conflict & SIMOPs Inspector
                 </h3>
                 <span className="font-mono text-[10px] px-2 py-0.5 rounded-full bg-[var(--color-accent-subtle)] text-[var(--color-accent)] border border-[var(--color-accent-border)] font-semibold">
-                  {source?.includes('gemini') ? 'Gemini 3.8 Flash' : 'Safety Engine'}
+                  {source?.includes('gemini') ? 'Gemini 4 AI' : 'Safety Engine'}
                 </span>
               </div>
               <p className="text-xs text-[var(--color-text-muted)]">

@@ -1,46 +1,42 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { HistoryRecord, PermitType } from '../types/permit';
-import { isPermitClosed, isPermitOverdue, isPermitRejected, getWorkOrderNumber } from '../utils/permitHelpers';
 import {
-  Lock,
   Unlock,
   FileSpreadsheet,
   Printer,
   RefreshCw,
   Eye,
   EyeOff,
-  ShieldAlert,
   BarChart3,
   AlertTriangle,
   CheckCircle,
   Clock,
   Layers,
-  Sparkles,
-  PieChart,
-  SlidersHorizontal,
-  ChevronRight,
   Database,
   User,
   KeyRound,
   ShieldCheck,
-  BadgeCheck,
-  Building2,
   LogOut,
-  Info,
+  UserPlus,
 } from 'lucide-react';
 import { ExecutiveGraphicalDashboard, UnifiedPermitRecord } from './ExecutiveGraphicalDashboard';
 import { getUnifiedPermits } from '../data/plantAuditRecords';
 import {
   ExecutiveUser,
-  getActiveExecutiveSession,
-  getExecutiveAccounts,
+  fetchExecutiveAuthStatus,
+  setupInitialExecutiveAccount,
+  createExecutiveAccount,
 } from '../utils/executiveAuth';
 import { ChangePasswordModal } from './ChangePasswordModal';
 
 interface AdminOperationsViewProps {
   history: Record<PermitType, HistoryRecord[]>;
   isAdminUnlocked: boolean;
-  onUnlockWithCredentials: (username: string, password: string) => { success: boolean; error?: string; user?: ExecutiveUser };
+  onUnlockWithCredentials: (
+    username: string,
+    password: string
+  ) => Promise<{ success: boolean; error?: string; user?: ExecutiveUser }>;
+  onBootstrapAuthenticated: (user: ExecutiveUser) => void;
   onLock: () => void;
   onRefresh: () => void;
   onOpenViewer: (formType: PermitType, record: HistoryRecord, submissionId: string) => void;
@@ -51,18 +47,45 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
   history,
   isAdminUnlocked,
   onUnlockWithCredentials,
+  onBootstrapAuthenticated,
   onLock,
   onRefresh,
   onOpenViewer,
   currentExecutiveUser,
 }) => {
+  // Server Auth Configuration Status
+  const [authConfigured, setAuthConfigured] = useState<boolean>(true);
+  const [statusLoading, setStatusLoading] = useState<boolean>(true);
+
   // Login State
   const [usernameInput, setUsernameInput] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loginError, setLoginError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [showAccountsDirectory, setShowAccountsDirectory] = useState(false);
+
+  // First-Run Executive Account Setup State (only shown when server has 0 accounts & no env password)
+  const [setupFullName, setSetupFullName] = useState('');
+  const [setupWorkId, setSetupWorkId] = useState('');
+  const [setupRole, setSetupRole] = useState('Corporate EHS Director');
+  const [setupDepartment, setSetupDepartment] = useState('Health, Safety & Environment');
+  const [setupFacility, setSetupFacility] = useState<ExecutiveUser['facility']>('All GHACEM Facilities');
+  const [setupUsername, setSetupUsername] = useState('');
+  const [setupPassword, setSetupPassword] = useState('');
+  const [setupConfirmPassword, setSetupConfirmPassword] = useState('');
+
+  // Authenticated Add Executive Modal State
+  const [isAddExecOpen, setIsAddExecOpen] = useState(false);
+  const [newExecFullName, setNewExecFullName] = useState('');
+  const [newExecWorkId, setNewExecWorkId] = useState('');
+  const [newExecRole, setNewExecRole] = useState('Safety Operations Lead');
+  const [newExecDepartment, setNewExecDepartment] = useState('EHS & Operations');
+  const [newExecFacility, setNewExecFacility] = useState<ExecutiveUser['facility']>('All GHACEM Facilities');
+  const [newExecClearance, setNewExecClearance] = useState<ExecutiveUser['clearanceLevel']>('Level 2 - Plant Lead');
+  const [newExecUsername, setNewExecUsername] = useState('');
+  const [newExecPassword, setNewExecPassword] = useState('');
+  const [newExecError, setNewExecError] = useState('');
+  const [isCreatingExec, setIsCreatingExec] = useState(false);
 
   // Password Change Modal State
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
@@ -75,8 +98,18 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
   const [typeFilter, setTypeFilter] = useState('');
   const [includeBaseline, setIncludeBaseline] = useState(true);
 
-  // Registered executive accounts for quick reference hint
-  const availableAccounts = useMemo(() => getExecutiveAccounts(), [isChangePasswordOpen]);
+  useEffect(() => {
+    if (!isAdminUnlocked) {
+      setStatusLoading(true);
+      fetchExecutiveAuthStatus()
+        .then((st) => {
+          setAuthConfigured(st.configured);
+        })
+        .finally(() => {
+          setStatusLoading(false);
+        });
+    }
+  }, [isAdminUnlocked]);
 
   // Unified permit records
   const unifiedRecords: UnifiedPermitRecord[] = useMemo(() => {
@@ -141,7 +174,7 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
     window.print();
   };
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
     setIsSubmitting(true);
@@ -158,7 +191,7 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
       return;
     }
 
-    const result = onUnlockWithCredentials(usernameInput, passwordInput);
+    const result = await onUnlockWithCredentials(usernameInput, passwordInput);
     if (result.success) {
       setUsernameInput('');
       setPasswordInput('');
@@ -169,10 +202,84 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
     setIsSubmitting(false);
   };
 
-  const handleQuickFill = (user: string, pass: string) => {
-    setUsernameInput(user);
-    setPasswordInput(pass);
+  const handleSetupSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
     setLoginError('');
+
+    if (!setupFullName.trim() || !setupUsername.trim() || !setupWorkId.trim()) {
+      setLoginError('Full name, Work ID, and username are required.');
+      return;
+    }
+    if (setupPassword.length < 8) {
+      setLoginError('Password must be at least 8 characters long.');
+      return;
+    }
+    if (setupPassword !== setupConfirmPassword) {
+      setLoginError('Passwords do not match.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    const res = await setupInitialExecutiveAccount({
+      username: setupUsername.trim(),
+      password: setupPassword,
+      fullName: setupFullName.trim(),
+      role: setupRole.trim() || 'Corporate EHS Director',
+      department: setupDepartment.trim() || 'Health, Safety & Environment',
+      facility: setupFacility,
+      workId: setupWorkId.trim().toUpperCase(),
+    });
+    setIsSubmitting(false);
+
+    if (res.success && res.user) {
+      setAuthConfigured(true);
+      setSetupPassword('');
+      setSetupConfirmPassword('');
+      onBootstrapAuthenticated(res.user);
+    } else {
+      setLoginError(res.error || 'Failed to configure initial executive account.');
+      const st = await fetchExecutiveAuthStatus();
+      setAuthConfigured(st.configured);
+    }
+  };
+
+  const handleCreateExecutive = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setNewExecError('');
+
+    if (!newExecFullName.trim() || !newExecUsername.trim() || !newExecWorkId.trim()) {
+      setNewExecError('Full name, Work ID, and username are required.');
+      return;
+    }
+    if (newExecPassword.length < 8) {
+      setNewExecError('Password must be at least 8 characters long.');
+      return;
+    }
+
+    setIsCreatingExec(true);
+    const res = await createExecutiveAccount({
+      username: newExecUsername.trim(),
+      password: newExecPassword,
+      fullName: newExecFullName.trim(),
+      role: newExecRole.trim() || 'Safety Operations Lead',
+      department: newExecDepartment.trim() || 'EHS & Operations',
+      facility: newExecFacility,
+      workId: newExecWorkId.trim().toUpperCase(),
+      clearanceLevel: newExecClearance,
+    });
+    setIsCreatingExec(false);
+
+    if (res.success && res.user) {
+      setIsAddExecOpen(false);
+      setNewExecFullName('');
+      setNewExecWorkId('');
+      setNewExecUsername('');
+      setNewExecPassword('');
+      setToastNotification(`✓ Provisioned executive account for ${res.user.fullName} (${res.user.username}).`);
+      setTimeout(() => setToastNotification(null), 5000);
+    } else {
+      setNewExecError(res.error || 'Failed to provision executive account.');
+    }
   };
 
   // Chart drilldown
@@ -197,7 +304,7 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
     }
   };
 
-  // If locked, render the Executive Username + Password Login Gate
+  // If locked, render either First-Run Executive Setup or Executive Username + Password Login Gate
   if (!isAdminUnlocked) {
     return (
       <div className="mx-auto max-w-lg py-8 sm:py-12 px-4">
@@ -213,134 +320,215 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
                 ISO 45001 EHS GOVERNANCE
               </div>
               <h2 className="font-display font-black text-2xl text-[var(--color-text-main)] tracking-tight">
-                Executive Operations Login
+                {!statusLoading && !authConfigured ? 'Claim Executive Console Access' : 'Executive Operations Login'}
               </h2>
               <p className="text-xs text-[var(--color-text-muted)] max-w-sm mx-auto leading-relaxed mt-1">
-                Authorized Plant Leadership, EHS Directors, and Governance Officers must provide verified username and password credentials.
+                {!statusLoading && !authConfigured
+                  ? 'No executive administrator has been claimed yet. Create the primary Director/EHS executive account to secure this portal.'
+                  : 'Authorized Plant Leadership, EHS Directors, and Governance Officers must provide verified username and password credentials.'}
               </p>
             </div>
           </div>
 
-          {/* Login Form */}
-          <form onSubmit={handleLoginSubmit} className="space-y-4">
-            {loginError && (
-              <div className="rounded-xl border border-red-500/40 bg-red-600/10 p-3 text-xs text-red-600 dark:text-red-400 font-medium flex items-start gap-2.5 animate-shake">
-                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-red-500" />
-                <span>{loginError}</span>
-              </div>
-            )}
-
-            {/* Username / Work ID field */}
-            <div>
-              <label className="block text-xs font-semibold text-[var(--color-text-main)] mb-1.5">
-                Executive Username or Work ID
-              </label>
-              <div className="relative">
-                <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-[var(--color-text-muted)]">
-                  <User className="h-4 w-4" />
+          {statusLoading ? (
+            <div className="py-8 text-center text-xs text-[var(--color-text-muted)] font-mono">
+              Verifying executive authentication status...
+            </div>
+          ) : !authConfigured ? (
+            <form onSubmit={handleSetupSubmit} className="space-y-3.5">
+              {loginError && (
+                <div className="rounded-xl border border-red-500/40 bg-red-600/10 p-3 text-xs text-red-600 dark:text-red-400 font-medium flex items-start gap-2.5">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-red-500" />
+                  <span>{loginError}</span>
                 </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--color-text-main)] mb-1">
+                    Full Name *
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Ing. Kwame Osei-Tutu"
+                    value={setupFullName}
+                    onChange={(e) => setSetupFullName(e.target.value)}
+                    className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 text-xs text-[var(--color-text-main)] focus:border-[var(--color-accent)] focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--color-text-main)] mb-1">
+                    Employee Work ID *
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. GH-EHS-01"
+                    value={setupWorkId}
+                    onChange={(e) => setSetupWorkId(e.target.value)}
+                    className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 text-xs font-mono text-[var(--color-text-main)] focus:border-[var(--color-accent)] focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--color-text-main)] mb-1">
+                    Executive Role
+                  </label>
+                  <input
+                    type="text"
+                    value={setupRole}
+                    onChange={(e) => setSetupRole(e.target.value)}
+                    className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 text-xs text-[var(--color-text-main)] focus:border-[var(--color-accent)] focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--color-text-main)] mb-1">
+                    Facility Scope
+                  </label>
+                  <select
+                    value={setupFacility}
+                    onChange={(e) => setSetupFacility(e.target.value as ExecutiveUser['facility'])}
+                    className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 text-xs text-[var(--color-text-main)] focus:border-[var(--color-accent)] focus:outline-none"
+                  >
+                    <option value="All GHACEM Facilities">All GHACEM Facilities</option>
+                    <option value="Tema Main Works">Tema Main Works</option>
+                    <option value="Takoradi Grinding Plant">Takoradi Grinding Plant</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[var(--color-text-main)] mb-1">
+                  Executive Username *
+                </label>
                 <input
                   type="text"
                   autoComplete="username"
-                  placeholder="e.g. director.ehs or GH-EHS-01"
-                  value={usernameInput}
-                  onChange={(e) => setUsernameInput(e.target.value)}
-                  className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] pl-9 pr-3.5 py-2.5 text-xs text-[var(--color-text-main)] font-mono placeholder:text-[var(--color-text-faint)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                  placeholder="e.g. director.ehs"
+                  value={setupUsername}
+                  onChange={(e) => setSetupUsername(e.target.value)}
+                  className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 text-xs font-mono text-[var(--color-text-main)] focus:border-[var(--color-accent)] focus:outline-none"
                 />
               </div>
-            </div>
 
-            {/* Password field */}
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <label className="block text-xs font-semibold text-[var(--color-text-main)]">
-                  Specific Executive Password
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--color-text-main)] mb-1">
+                    Password (min. 8 chars) *
+                  </label>
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    autoComplete="new-password"
+                    placeholder="Choose strong password"
+                    value={setupPassword}
+                    onChange={(e) => setSetupPassword(e.target.value)}
+                    className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 text-xs font-mono text-[var(--color-text-main)] focus:border-[var(--color-accent)] focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--color-text-main)] mb-1">
+                    Confirm Password *
+                  </label>
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    autoComplete="new-password"
+                    placeholder="Re-type password"
+                    value={setupConfirmPassword}
+                    onChange={(e) => setSetupConfirmPassword(e.target.value)}
+                    className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 text-xs font-mono text-[var(--color-text-main)] focus:border-[var(--color-accent)] focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text-main)] flex items-center gap-1 cursor-pointer"
+              >
+                {showPassword ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                <span>{showPassword ? 'Hide passwords' : 'Show passwords'}</span>
+              </button>
+
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                className="w-full py-2.5 rounded-xl bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-neutral-950 font-display font-bold text-xs transition-colors shadow-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                <ShieldCheck className="h-4 w-4" />
+                <span>{isSubmitting ? 'Securing Account...' : 'Create Executive Account & Unlock'}</span>
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={handleLoginSubmit} className="space-y-4">
+              {loginError && (
+                <div className="rounded-xl border border-red-500/40 bg-red-600/10 p-3 text-xs text-red-600 dark:text-red-400 font-medium flex items-start gap-2.5 animate-shake">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-red-500" />
+                  <span>{loginError}</span>
+                </div>
+              )}
+
+              {/* Username / Work ID field */}
+              <div>
+                <label className="block text-xs font-semibold text-[var(--color-text-main)] mb-1.5">
+                  Executive Username or Work ID
                 </label>
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text-main)] flex items-center gap-1 cursor-pointer"
-                >
-                  {showPassword ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
-                  <span>{showPassword ? 'Hide' : 'Show'}</span>
-                </button>
-              </div>
-              <div className="relative">
-                <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-[var(--color-text-muted)]">
-                  <KeyRound className="h-4 w-4" />
-                </div>
-                <input
-                  type={showPassword ? 'text' : 'password'}
-                  autoComplete="current-password"
-                  placeholder="Enter your designated executive password"
-                  value={passwordInput}
-                  onChange={(e) => setPasswordInput(e.target.value)}
-                  className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] pl-9 pr-3.5 py-2.5 text-xs text-[var(--color-text-main)] font-mono placeholder:text-[var(--color-text-faint)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                />
-              </div>
-            </div>
-
-            {/* Submit button */}
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="w-full py-2.5 rounded-xl bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-neutral-950 font-display font-bold text-xs transition-colors shadow-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-            >
-              <Unlock className="h-3.5 w-3.5" />
-              <span>Verify &amp; Unlock Executive Console</span>
-            </button>
-          </form>
-
-          {/* Quick Authorized Accounts Directory Drawer */}
-          <div className="pt-2 border-t border-[var(--color-border)]">
-            <button
-              type="button"
-              onClick={() => setShowAccountsDirectory(!showAccountsDirectory)}
-              className="w-full py-2 px-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-elevated)] text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-main)] flex items-center justify-between cursor-pointer transition-colors"
-            >
-              <div className="flex items-center gap-2 font-mono text-[11px]">
-                <Info className="h-3.5 w-3.5 text-[var(--color-accent)]" />
-                <span>Authorized Executive Credentials Directory</span>
-              </div>
-              <span className="text-[10px] text-[var(--color-accent)] font-semibold">
-                {showAccountsDirectory ? 'Hide Directory ▲' : 'Show Accounts ▼'}
-              </span>
-            </button>
-
-            {showAccountsDirectory && (
-              <div className="mt-3 p-3.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] space-y-2.5 animate-fade-in text-left">
-                <div className="text-[11px] font-bold text-[var(--color-text-main)]">
-                  Pre-configured Executive Accounts (Click to Auto-Fill):
-                </div>
-
-                <div className="space-y-1.5 text-xs">
-                  {availableAccounts.map((acc) => (
-                    <button
-                      key={acc.id}
-                      type="button"
-                      onClick={() => handleQuickFill(acc.username, acc.passwordHash)}
-                      className="w-full p-2.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-accent)] hover:bg-[var(--color-surface-hover)] transition-all flex items-center justify-between group cursor-pointer text-left"
-                    >
-                      <div>
-                        <div className="font-semibold text-[var(--color-text-main)] flex items-center gap-1.5">
-                          <span>{acc.fullName}</span>
-                          <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-[var(--color-surface-elevated)] text-[var(--color-text-muted)]">
-                            {acc.role}
-                          </span>
-                        </div>
-                        <div className="text-[11px] font-mono text-[var(--color-text-muted)] mt-0.5">
-                          User: <span className="text-[var(--color-accent)] font-bold">{acc.username}</span> · Pass: <span className="text-[var(--color-text-main)] font-mono">{acc.passwordHash}</span>
-                        </div>
-                      </div>
-                      <span className="text-[10px] font-mono text-[var(--color-accent)] opacity-0 group-hover:opacity-100 transition-opacity font-bold">
-                        Fill →
-                      </span>
-                    </button>
-                  ))}
+                <div className="relative">
+                  <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-[var(--color-text-muted)]">
+                    <User className="h-4 w-4" />
+                  </div>
+                  <input
+                    type="text"
+                    autoComplete="username"
+                    placeholder="Enter username or Work ID"
+                    value={usernameInput}
+                    onChange={(e) => setUsernameInput(e.target.value)}
+                    className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] pl-9 pr-3.5 py-2.5 text-xs text-[var(--color-text-main)] font-mono placeholder:text-[var(--color-text-faint)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                  />
                 </div>
               </div>
-            )}
-          </div>
+
+              {/* Password field */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-semibold text-[var(--color-text-main)]">
+                    Executive Password
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text-main)] flex items-center gap-1 cursor-pointer"
+                  >
+                    {showPassword ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                    <span>{showPassword ? 'Hide' : 'Show'}</span>
+                  </button>
+                </div>
+                <div className="relative">
+                  <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-[var(--color-text-muted)]">
+                    <KeyRound className="h-4 w-4" />
+                  </div>
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    autoComplete="current-password"
+                    placeholder="Enter your designated executive password"
+                    value={passwordInput}
+                    onChange={(e) => setPasswordInput(e.target.value)}
+                    className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] pl-9 pr-3.5 py-2.5 text-xs text-[var(--color-text-main)] font-mono placeholder:text-[var(--color-text-faint)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                  />
+                </div>
+              </div>
+
+              {/* Submit button */}
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                className="w-full py-2.5 rounded-xl bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-neutral-950 font-display font-bold text-xs transition-colors shadow-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                <Unlock className="h-3.5 w-3.5" />
+                <span>{isSubmitting ? 'Verifying...' : 'Verify & Unlock Executive Console'}</span>
+              </button>
+            </form>
+          )}
 
           <div className="text-center text-[11px] text-[var(--color-text-faint)]">
             GHACEM Limited · Heidelberg Materials EHS Corporate Governance
@@ -433,6 +621,17 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
                   </div>
                 </div>
               </div>
+            )}
+
+            {currentExecutiveUser?.clearanceLevel === 'Level 3 - Director & Executive' && (
+              <button
+                onClick={() => setIsAddExecOpen(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-elevated)] hover:bg-[var(--color-surface-hover)] text-xs text-[var(--color-text-main)] transition-colors cursor-pointer"
+                title="Provision a new executive login account"
+              >
+                <UserPlus className="h-3.5 w-3.5 text-emerald-500" />
+                <span>Add Executive</span>
+              </button>
             )}
 
             <button
@@ -757,6 +956,117 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
           setTimeout(() => setToastNotification(null), 5000);
         }}
       />
+
+      {/* Provision New Executive Modal (Authenticated Level 3) */}
+      {isAddExecOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-fade-in">
+          <div className="w-full max-w-md rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between border-b border-[var(--color-border)] px-5 py-4 bg-[var(--color-surface-elevated)]">
+              <div className="flex items-center gap-2">
+                <UserPlus className="h-4 w-4 text-emerald-500" />
+                <h3 className="font-display font-bold text-sm text-[var(--color-text-main)]">
+                  Provision Executive Account
+                </h3>
+              </div>
+              <button
+                onClick={() => setIsAddExecOpen(false)}
+                className="text-xs font-mono text-[var(--color-text-muted)] hover:text-[var(--color-text-main)]"
+              >
+                Close
+              </button>
+            </div>
+            <form onSubmit={handleCreateExecutive} className="p-5 space-y-3 text-xs">
+              {newExecError && (
+                <div className="rounded-xl border border-red-500/30 bg-red-600/10 p-2.5 text-red-500">
+                  {newExecError}
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-2.5">
+                <input
+                  type="text"
+                  placeholder="Full Name *"
+                  value={newExecFullName}
+                  onChange={(e) => setNewExecFullName(e.target.value)}
+                  className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 text-[var(--color-text-main)]"
+                />
+                <input
+                  type="text"
+                  placeholder="Work ID (e.g. GH-SAF-03) *"
+                  value={newExecWorkId}
+                  onChange={(e) => setNewExecWorkId(e.target.value)}
+                  className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 font-mono text-[var(--color-text-main)]"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2.5">
+                <input
+                  type="text"
+                  placeholder="Role"
+                  value={newExecRole}
+                  onChange={(e) => setNewExecRole(e.target.value)}
+                  className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 text-[var(--color-text-main)]"
+                />
+                <input
+                  type="text"
+                  placeholder="Department"
+                  value={newExecDepartment}
+                  onChange={(e) => setNewExecDepartment(e.target.value)}
+                  className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 text-[var(--color-text-main)]"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2.5">
+                <select
+                  value={newExecFacility}
+                  onChange={(e) => setNewExecFacility(e.target.value as ExecutiveUser['facility'])}
+                  className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 text-[var(--color-text-main)]"
+                >
+                  <option value="All GHACEM Facilities">All GHACEM Facilities</option>
+                  <option value="Tema Main Works">Tema Main Works</option>
+                  <option value="Takoradi Grinding Plant">Takoradi Grinding Plant</option>
+                </select>
+                <select
+                  value={newExecClearance}
+                  onChange={(e) => setNewExecClearance(e.target.value as ExecutiveUser['clearanceLevel'])}
+                  className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 text-[var(--color-text-main)]"
+                >
+                  <option value="Level 2 - Plant Lead">Level 2 - Plant Lead</option>
+                  <option value="Level 3 - Director & Executive">Level 3 - Director &amp; Executive</option>
+                  <option value="Level 1 - Supervisor">Level 1 - Supervisor</option>
+                </select>
+              </div>
+              <input
+                type="text"
+                placeholder="Username *"
+                value={newExecUsername}
+                onChange={(e) => setNewExecUsername(e.target.value)}
+                className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 font-mono text-[var(--color-text-main)]"
+              />
+              <input
+                type="password"
+                placeholder="Initial Password (min. 8 chars) *"
+                value={newExecPassword}
+                onChange={(e) => setNewExecPassword(e.target.value)}
+                className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 font-mono text-[var(--color-text-main)]"
+              />
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsAddExecOpen(false)}
+                  className="px-3.5 py-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] text-[var(--color-text-muted)]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isCreatingExec}
+                  className="px-4 py-2 rounded-xl bg-[var(--color-accent)] text-neutral-950 font-bold disabled:opacity-50"
+                >
+                  {isCreatingExec ? 'Saving...' : 'Create Account'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

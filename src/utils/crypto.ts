@@ -161,26 +161,14 @@ export async function decryptDocument<T>(
   };
 }
 
-/** Default corporate session encryption key management */
-const VAULT_SESSION_KEY = 'ghacem_crypto_session_passphrase';
+/** Corporate session encryption key management (in-memory only, never hardcoded) */
+let inMemoryVaultPassphrase = '';
 
 export function getStoredVaultPassphrase(): string {
-  try {
-    return sessionStorage.getItem(VAULT_SESSION_KEY) || localStorage.getItem(VAULT_SESSION_KEY) || 'GHACEM-SECURITY-KEY-2026';
-  } catch {
-    return 'GHACEM-SECURITY-KEY-2026';
-  }
+  return inMemoryVaultPassphrase;
 }
 
-export function saveStoredVaultPassphrase(passphrase: string, remember: boolean): void {
-  try {
-    sessionStorage.setItem(VAULT_SESSION_KEY, passphrase);
-    if (remember) {
-      localStorage.setItem(VAULT_SESSION_KEY, passphrase);
-    } else {
-      localStorage.removeItem(VAULT_SESSION_KEY);
-    }
-  } catch (e) {
-    console.error('Failed to store encryption key:', e);
-  }
+export function saveStoredVaultPassphrase(passphrase: string, _remember?: boolean): void {
+  inMemoryVaultPassphrase = passphrase;
 }
+

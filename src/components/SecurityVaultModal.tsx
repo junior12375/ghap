@@ -21,7 +21,6 @@ export const SecurityVaultModal: React.FC<SecurityVaultModalProps> = ({
   currentPermitState,
 }) => {
   const [passphrase, setPassphrase] = useState(getStoredVaultPassphrase());
-  const [saveLocally, setSaveLocally] = useState(true);
   const [activeTab, setActiveTab] = useState<'status' | 'key' | 'export' | 'import'>('status');
   const [integrityHashes, setIntegrityHashes] = useState<Record<string, string>>({});
   const [isVerifying, setIsVerifying] = useState(false);
@@ -54,16 +53,24 @@ export const SecurityVaultModal: React.FC<SecurityVaultModalProps> = ({
 
   const handleSavePassphrase = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!passphrase.trim()) return;
-    saveStoredVaultPassphrase(passphrase.trim(), saveLocally);
-    setStatusMessage('✓ AES-256 Master Key updated in secure vault.');
+    if (!passphrase.trim() || passphrase.trim().length < 8) {
+      setStatusMessage('Please enter a strong vault passphrase (minimum 8 characters).');
+      return;
+    }
+    saveStoredVaultPassphrase(passphrase.trim());
+    setStatusMessage('✓ AES-256 Master Key active for this browser memory session.');
   };
 
   const handleExportEncryptedPackage = async (type: 'general' | 'hotwork' | 'height') => {
+    if (!passphrase.trim()) {
+      setStatusMessage('Please set a Vault Passphrase in the "Encryption Key" tab before exporting.');
+      setActiveTab('key');
+      return;
+    }
     try {
       const data = currentPermitState[type];
       const subId = data._submissionId || `draft-${type}-${Date.now()}`;
-      const pkg = await encryptDocument(data, passphrase, {
+      const pkg = await encryptDocument(data, passphrase.trim(), {
         submissionId: subId,
         formType: type,
         workOrder: (data as { workOrderNumber?: string; workOrderNo?: string }).workOrderNumber || (data as { workOrderNo?: string }).workOrderNo || 'N/A',
@@ -88,6 +95,11 @@ export const SecurityVaultModal: React.FC<SecurityVaultModalProps> = ({
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (!passphrase.trim()) {
+      setStatusMessage('Please enter the matching Vault Passphrase in the "Encryption Key" tab first.');
+      setActiveTab('key');
+      return;
+    }
 
     const reader = new FileReader();
     reader.onload = async () => {
@@ -99,10 +111,10 @@ export const SecurityVaultModal: React.FC<SecurityVaultModalProps> = ({
           throw new Error('Unsupported encryption format');
         }
 
-        const { data, verified } = await decryptDocument(pkg, passphrase);
+        const { data } = await decryptDocument(pkg, passphrase.trim());
         setImportedData(data);
         setStatusMessage(`✓ Verified & Decrypted: Package authentic (SHA-256: ${pkg.sha256Hash.substring(0, 16)}...)`);
-      } catch (err) {
+      } catch {
         setStatusMessage(`Decryption failed: Incorrect key or document was tampered with.`);
       }
     };
@@ -227,21 +239,15 @@ export const SecurityVaultModal: React.FC<SecurityVaultModalProps> = ({
                 </p>
               </div>
 
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={saveLocally}
-                  onChange={(e) => setSaveLocally(e.target.checked)}
-                  className="rounded accent-[var(--color-accent)]"
-                />
-                <span className="text-[11px] text-[var(--color-text-muted)]">Remember key on this corporate workstation</span>
-              </label>
+              <p className="text-[11px] text-[var(--color-text-muted)]">
+                The vault key is held only in active browser memory for this session and is never written to storage.
+              </p>
 
               <button
                 type="submit"
                 className="px-4 py-2 rounded-lg bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-neutral-950 font-bold text-xs"
               >
-                Save Vault Key
+                Activate Vault Key
               </button>
             </form>
           )}

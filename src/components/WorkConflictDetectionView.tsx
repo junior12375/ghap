@@ -45,7 +45,8 @@ export const WorkConflictDetectionView: React.FC<WorkConflictDetectionViewProps>
   // Audit state
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [analysisResult, setAnalysisResult] = useState<ConflictAnalysisResult | null>(null);
-  const [engineSource, setEngineSource] = useState<string>('gemini-3.8-flash');
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [engineSource, setEngineSource] = useState<string>('gemini-4-hydrogen');
   const [plantScanFilter, setPlantScanFilter] = useState<'all' | 'conflicts-only'>('all');
 
   // Flatten all history permits
@@ -79,6 +80,7 @@ export const WorkConflictDetectionView: React.FC<WorkConflictDetectionViewProps>
   const handleRunAudit = async () => {
     if (!workOrderInput && !jobTypeInput) return;
     setIsLoading(true);
+    setAuditError(null);
 
     try {
       const flatRecords = [...history.general, ...history.hotwork, ...history.height];
@@ -92,10 +94,12 @@ export const WorkConflictDetectionView: React.FC<WorkConflictDetectionViewProps>
 
       if (res && res.analysis) {
         setAnalysisResult(res.analysis);
-        setEngineSource(res.source || 'gemini-3.8-flash');
+        setEngineSource(res.source || 'gemini-4-hydrogen');
+      } else if (res && res.error) {
+        setAuditError(res.error);
       }
     } catch (e) {
-      console.error('Audit failed:', e);
+      setAuditError(String(e));
     } finally {
       setIsLoading(false);
     }
@@ -109,6 +113,7 @@ export const WorkConflictDetectionView: React.FC<WorkConflictDetectionViewProps>
     setEquipmentInput(eq);
     // Auto-run audit
     setIsLoading(true);
+    setAuditError(null);
     const flatRecords = [...history.general, ...history.hotwork, ...history.height];
     detectWorkConflicts({
       workOrderNumber: wo,
@@ -120,7 +125,9 @@ export const WorkConflictDetectionView: React.FC<WorkConflictDetectionViewProps>
       .then((res) => {
         if (res && res.analysis) {
           setAnalysisResult(res.analysis);
-          setEngineSource(res.source || 'gemini-3.8-flash');
+          setEngineSource(res.source || 'gemini-4-hydrogen');
+        } else if (res && res.error) {
+          setAuditError(res.error);
         }
       })
       .finally(() => {
@@ -223,7 +230,7 @@ export const WorkConflictDetectionView: React.FC<WorkConflictDetectionViewProps>
                   AI Work Conflict & SIMOPs Command Center
                 </h2>
                 <span className="font-mono text-[10px] sm:text-xs px-2.5 py-0.5 rounded-full bg-[var(--color-accent-subtle)] text-[var(--color-accent)] border border-[var(--color-accent-border)] font-semibold">
-                  Gemini 3.8 Flash
+                  Gemini 4 AI
                 </span>
               </div>
               <p className="text-xs text-[var(--color-text-muted)] mt-0.5">
@@ -459,6 +466,14 @@ export const WorkConflictDetectionView: React.FC<WorkConflictDetectionViewProps>
               <p className="text-xs text-[var(--color-text-muted)] max-w-sm mx-auto">
                 Comparing Work Order #{workOrderInput || 'N/A'} against active permits for spatial collisions, drop zones, atmospheric risks, and duplicate authorizations.
               </p>
+            </div>
+          ) : auditError ? (
+            <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-6 space-y-2 text-xs">
+              <div className="flex items-center gap-2 font-bold text-red-500">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <span>AI Conflict Audit Unavailable</span>
+              </div>
+              <p className="text-[var(--color-text-main)] leading-relaxed">{auditError}</p>
             </div>
           ) : analysisResult ? (
             <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 space-y-4">

@@ -29,10 +29,9 @@ import { ConflictAnalysisResult } from './types/permit';
 import { detectWorkConflicts } from './utils/aiConflictDetector';
 import {
   ExecutiveUser,
-  verifyExecutiveLogin,
-  setExecutiveSession,
+  loginExecutive,
   clearExecutiveSession,
-  getActiveExecutiveSession,
+  getActiveExecutiveUser,
 } from './utils/executiveAuth';
 
 import {
@@ -82,23 +81,9 @@ export default function App() {
     pendingQueueCount: getOutboxQueue().length,
   });
 
-  // Admin Access Gate & Executive User Session
-  const [currentExecutiveUser, setCurrentExecutiveUser] = useState<ExecutiveUser | null>(() => {
-    try {
-      const active = getActiveExecutiveSession();
-      return active ? active.user : null;
-    } catch {
-      return null;
-    }
-  });
-
-  const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(() => {
-    try {
-      return sessionStorage.getItem('ghacem_admin_unlocked') === '1' && !!getActiveExecutiveSession();
-    } catch {
-      return false;
-    }
-  });
+  // Admin Access Gate & Executive User Session (in-memory Bearer token only)
+  const [currentExecutiveUser, setCurrentExecutiveUser] = useState<ExecutiveUser | null>(() => getActiveExecutiveUser());
+  const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(false);
 
   // Theme Preset (White daylight default, Emerald dark, Steel slate)
   const [currentTheme, setCurrentTheme] = useState<string>(() => {
@@ -151,7 +136,7 @@ export default function App() {
   });
   const [isConflictModalOpen, setIsConflictModalOpen] = useState(false);
   const [conflictModalTarget, setConflictModalTarget] = useState<PermitType>('general');
-  const [conflictSource, setConflictSource] = useState<string>('gemini-3.8-flash');
+  const [conflictSource, setConflictSource] = useState<string>('gemini-4-hydrogen');
 
   // Welcome Gate & Mandatory Terms State - Automatically the first page to see before the permit
   const [isWelcomeGateOpen, setIsWelcomeGateOpen] = useState<boolean>(true);
@@ -345,12 +330,14 @@ export default function App() {
 
         if (res && res.analysis) {
           setConflictAnalysisState((prev) => ({ ...prev, [targetType]: res.analysis }));
-          setConflictSource(res.source || 'gemini-3.8-flash');
+          setConflictSource(res.source || 'gemini-4-hydrogen');
           if (res.analysis.hasDirectConflict) {
             showToast(`⚠️ ${res.analysis.detectedConflicts.length} work conflict(s) detected (${res.analysis.conflictLevel} risk).`);
           } else {
             showToast(`✓ AI Conflict Scan Complete: Clear of collisions.`);
           }
+        } else if (res && res.error) {
+          showToast(res.error);
         }
       } catch (err) {
         console.error('Conflict detection error:', err);
@@ -834,16 +821,20 @@ export default function App() {
             history={historyCache}
             isAdminUnlocked={isAdminUnlocked}
             currentExecutiveUser={currentExecutiveUser}
-            onUnlockWithCredentials={(uname, pwd) => {
-              const user = verifyExecutiveLogin(uname, pwd);
-              if (user) {
-                setExecutiveSession(user);
-                setCurrentExecutiveUser(user);
+            onUnlockWithCredentials={async (uname, pwd) => {
+              const res = await loginExecutive(uname, pwd);
+              if (res.success && res.user) {
+                setCurrentExecutiveUser(res.user);
                 setIsAdminUnlocked(true);
-                showToast(`✓ Executive session unlocked. Welcome, ${user.fullName}.`);
-                return { success: true, user };
+                showToast(`✓ Executive session unlocked. Welcome, ${res.user.fullName}.`);
+                return { success: true, user: res.user };
               }
-              return { success: false, error: 'Invalid executive username or password. Check credentials and retry.' };
+              return { success: false, error: res.error || 'Invalid executive username or password. Check credentials and retry.' };
+            }}
+            onBootstrapAuthenticated={(user) => {
+              setCurrentExecutiveUser(user);
+              setIsAdminUnlocked(true);
+              showToast(`✓ Executive account created and console unlocked for ${user.fullName}.`);
             }}
             onLock={() => {
               clearExecutiveSession();

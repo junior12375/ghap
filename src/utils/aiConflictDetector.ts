@@ -207,9 +207,17 @@ export async function detectWorkConflicts(params: ConflictDetectionParams): Prom
     clearTimeout(timeoutId);
 
     if (!res.ok) {
-      console.warn(`Server responded with ${res.status}, using client fallback.`);
-      const fallback = evaluateClientFallbackConflicts(params);
-      return { ok: true, analysis: fallback, source: 'client-fallback' };
+      let errorMsg = `Server responded with HTTP ${res.status}`;
+      try {
+        const errJson = await res.json();
+        if (errJson?.error) errorMsg = String(errJson.error);
+      } catch {
+        // Ignore parse failure
+      }
+      return {
+        ok: false,
+        error: errorMsg,
+      };
     }
 
     const json = await res.json();
@@ -217,15 +225,17 @@ export async function detectWorkConflicts(params: ConflictDetectionParams): Prom
       return {
         ok: true,
         analysis: json.analysis,
-        source: json.source || 'gemini-3.8-flash',
+        source: json.source || 'gemini-4-hydrogen',
       };
-    } else {
-      const fallback = evaluateClientFallbackConflicts(params);
-      return { ok: true, analysis: fallback, source: 'client-fallback' };
     }
+
+    return {
+      ok: false,
+      error: json?.error || 'Conflict detection failed.',
+    };
   } catch (err) {
-    console.warn('Network call to /api/detect-conflicts failed, utilizing client fallback:', err);
+    console.warn('Network call to /api/detect-conflicts unreachable, utilizing offline rule-based check:', err);
     const fallback = evaluateClientFallbackConflicts(params);
-    return { ok: true, analysis: fallback, source: 'offline-client-heuristics' };
+    return { ok: true, analysis: fallback, source: 'offline-client-rules' };
   }
 }

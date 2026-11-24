@@ -1,20 +1,15 @@
 import React, { useState } from 'react';
 import {
   KeyRound,
-  ShieldCheck,
-  CheckCircle2,
   X,
   AlertCircle,
   Eye,
   EyeOff,
-  User,
-  Building2,
   BadgeCheck,
 } from 'lucide-react';
 import {
   ExecutiveUser,
   updateExecutivePassword,
-  getExecutiveAccounts,
 } from '../utils/executiveAuth';
 
 interface ChangePasswordModalProps {
@@ -35,25 +30,26 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPass, setShowPass] = useState(false);
   const [error, setError] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
 
   if (!isOpen || !currentUser) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+
+    if (currentUser.envManaged) {
+      setError('This administrator account is managed via EXECUTIVE_ADMIN_PASSWORD in Settings > Secrets.');
+      return;
+    }
 
     if (!currentPassword.trim()) {
       setError('Please enter your current password.');
       return;
     }
 
-    if (currentPassword !== currentUser.passwordHash) {
-      setError('Current password does not match records.');
-      return;
-    }
-
-    if (!newPassword.trim() || newPassword.length < 6) {
-      setError('New password must be at least 6 characters long.');
+    if (!newPassword.trim() || newPassword.length < 8) {
+      setError('New password must be at least 8 characters long.');
       return;
     }
 
@@ -67,15 +63,18 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
       return;
     }
 
-    const ok = updateExecutivePassword(currentUser.id, newPassword);
-    if (ok) {
+    setIsSaving(true);
+    const res = await updateExecutivePassword(currentPassword, newPassword);
+    setIsSaving(false);
+
+    if (res.success) {
       onPasswordChanged(`✓ Password for ${currentUser.fullName} updated successfully.`);
       onClose();
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
     } else {
-      setError('Failed to update password. Please check requirements.');
+      setError(res.error || 'Failed to update password. Please verify your current password.');
     }
   };
 
@@ -139,7 +138,7 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
 
           <div>
             <label className="block text-[11px] font-semibold text-[var(--color-text-main)] mb-1">
-              New Password <span className="text-[10px] text-[var(--color-text-muted)] font-normal">(min. 6 characters)</span>
+              New Password <span className="text-[10px] text-[var(--color-text-muted)] font-normal">(min. 8 characters)</span>
             </label>
             <input
               type={showPass ? 'text' : 'password'}
@@ -184,9 +183,10 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
             </button>
             <button
               type="submit"
-              className="px-4 py-2 rounded-xl bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-neutral-950 font-display font-bold text-xs transition-colors shadow-xs"
+              disabled={isSaving}
+              className="px-4 py-2 rounded-xl bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-neutral-950 font-display font-bold text-xs transition-colors shadow-xs disabled:opacity-50"
             >
-              Save New Password
+              {isSaving ? 'Updating...' : 'Save New Password'}
             </button>
           </div>
         </form>
