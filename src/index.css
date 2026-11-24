@@ -1,0 +1,158 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-display: 'Manrope', 'Plus Jakarta Sans', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+
+    /* Theme Tokens - Corporate Clean White / Daylight (Default) */
+    --color-canvas: #f8faf9;
+    --color-surface: #ffffff;
+    --color-surface-elevated: #f0f4f2;
+    --color-surface-hover: #e5ece8;
+    --color-border: #d0ded6;
+    --color-border-subtle: #e2ebe6;
+    --color-border-focus: #0f8a3c;
+
+    --color-text-main: #0c1a13;
+    --color-text-muted: #495e52;
+    --color-text-faint: #789082;
+
+    --color-accent: #0f8a3c;
+    --color-accent-hover: #0b6b2e;
+    --color-accent-subtle: rgba(15, 138, 60, 0.09);
+    --color-accent-border: rgba(15, 138, 60, 0.28);
+
+    --color-danger: #c5221f;
+    --color-danger-subtle: rgba(197, 34, 31, 0.09);
+    --color-warning: #b45309;
+    --color-warning-subtle: rgba(180, 83, 9, 0.09);
+    --color-good: #15803d;
+    --color-good-subtle: rgba(21, 128, 61, 0.09);
+  }
+
+  /* Explicit Daylight White Theme */
+  [data-theme='daylight'] {
+    --color-canvas: #f8faf9;
+    --color-surface: #ffffff;
+    --color-surface-elevated: #f0f4f2;
+    --color-surface-hover: #e5ece8;
+    --color-border: #d0ded6;
+    --color-border-subtle: #e2ebe6;
+    --color-border-focus: #0f8a3c;
+
+    --color-text-main: #0c1a13;
+    --color-text-muted: #495e52;
+    --color-text-faint: #789082;
+
+    --color-accent: #0f8a3c;
+    --color-accent-hover: #0b6b2e;
+    --color-accent-subtle: rgba(15, 138, 60, 0.09);
+    --color-accent-border: rgba(15, 138, 60, 0.28);
+
+    --color-danger: #c5221f;
+    --color-danger-subtle: rgba(197, 34, 31, 0.09);
+    --color-warning: #b45309;
+    --color-warning-subtle: rgba(180, 83, 9, 0.09);
+    --color-good: #15803d;
+    --color-good-subtle: rgba(21, 128, 61, 0.09);
+  }
+
+  /* Corporate Deep Emerald Dark Theme */
+  [data-theme='dark'] {
+    --color-canvas: #070d0a;
+    --color-surface: #0e1713;
+    --color-surface-elevated: #15221c;
+    --color-surface-hover: #1b2c24;
+    --color-border: #22372c;
+    --color-border-subtle: #192a21;
+    --color-border-focus: #00dd39;
+
+    --color-text-main: #f0f4f1;
+    --color-text-muted: #8ea396;
+    --color-text-faint: #566c60;
+
+    --color-accent: #00dd39;
+    --color-accent-hover: #00bf31;
+    --color-accent-subtle: rgba(0, 221, 57, 0.12);
+    --color-accent-border: rgba(0, 221, 57, 0.28);
+
+    --color-danger: #e63946;
+    --color-danger-subtle: rgba(230, 57, 70, 0.14);
+    --color-warning: #f4a261;
+    --color-warning-subtle: rgba(244, 162, 97, 0.14);
+    --color-good: #2a9d8f;
+    --color-good-subtle: rgba(42, 157, 143, 0.14);
+  }
+
+  /* Steel Slate Dark Theme */
+  [data-theme='steel'] {
+    --color-canvas: #090c10;
+    --color-surface: #10161f;
+    --color-surface-elevated: #17202c;
+    --color-surface-hover: #1f2b3b;
+    --color-border: #273547;
+    --color-border-subtle: #1b2636;
+    --color-border-focus: #3b82f6;
+
+    --color-text-main: #f1f5f9;
+    --color-text-muted: #94a3b8;
+    --color-text-faint: #64748b;
+
+    --color-accent: #38bdf8;
+    --color-accent-hover: #0ea5e9;
+    --color-accent-subtle: rgba(56, 189, 248, 0.12);
+    --color-accent-border: rgba(56, 189, 248, 0.28);
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-text-main);
+    font-family: var(--font-sans);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+    letter-spacing: -0.015em;
+  }
+}
+
+/* Tabular figures for numbers */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Subtle clean scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-faint);
+}
+
+/* Print stylesheet */
+@media print {
+  header, nav, .no-print, .reference-sidebar, #toastHost {
+    display: none !important;
+  }
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+  .print-page {
+    border: 1px solid #ccc !important;
+    box-shadow: none !important;
+    background: #ffffff !important;
+  }
+}

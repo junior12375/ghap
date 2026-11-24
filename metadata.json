@@ -1,0 +1,8 @@
+{
+  "name": "Remix GHACEM Corporate Permit-to-Work",
+  "description": "Enterprise permit-to-work management system with AES-256 document encryption, multi-stage workflow authorization, and cross-device cloud synchronization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
