@@ -1,5 +1,5 @@
 import React from 'react';
-import { Cloud, CloudOff, RefreshCw, Shield, SlidersHorizontal, Sun, Moon, FileText } from 'lucide-react';
+import { Cloud, CloudOff, RefreshCw, Sun, Moon, FileText } from 'lucide-react';
 import { SyncStatusInfo } from '../types/permit';
 import { GhacemLogo, HeidelbergMaterialsLogo } from './Logos';
 
@@ -7,8 +7,6 @@ interface HeaderProps {
   currentTab: string;
   onSelectTab: (tab: string) => void;
   syncStatus: SyncStatusInfo;
-  onOpenSyncModal: () => void;
-  onOpenSecurityModal: () => void;
   onOpenTermsModal?: () => void;
   currentTheme: string;
   onChangeTheme: (theme: string) => void;
@@ -19,8 +17,6 @@ export const Header: React.FC<HeaderProps> = ({
   currentTab,
   onSelectTab,
   syncStatus,
-  onOpenSyncModal,
-  onOpenSecurityModal,
   onOpenTermsModal,
   currentTheme,
   onChangeTheme,
@@ -146,21 +142,10 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           )}
 
-          {/* Document Encryption Vault Button */}
-          <button
-            onClick={onOpenSecurityModal}
-            title="Secure Document Encryption & SHA-256 Vault"
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-elevated)] text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-main)] hover:border-[var(--color-accent-border)] transition-colors"
-          >
-            <Shield className="h-3.5 w-3.5 text-[var(--color-accent)]" />
-            <span className="hidden sm:inline font-mono text-[11px]">AES-256</span>
-          </button>
-
-          {/* Cloud Sync Status Indicator */}
-          <button
-            onClick={onOpenSyncModal}
+          {/* Passive Cloud Sync Status Indicator */}
+          <div
             title={syncStatus.message}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-elevated)] text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-main)] hover:border-[var(--color-accent-border)] transition-colors"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-elevated)] text-xs text-[var(--color-text-muted)]"
           >
             {syncStatus.state === 'syncing' ? (
               <RefreshCw className="h-3.5 w-3.5 animate-spin text-[var(--color-accent)]" />
@@ -177,7 +162,7 @@ export const Header: React.FC<HeaderProps> = ({
                 {syncStatus.pendingQueueCount}
               </span>
             )}
-          </button>
+          </div>
 
           {/* Theme Selector */}
           <button
@@ -194,16 +179,6 @@ export const Header: React.FC<HeaderProps> = ({
             ) : (
               <Moon className="h-4 w-4 text-[var(--color-accent)]" />
             )}
-          </button>
-
-          {/* Sync Settings button */}
-          <button
-            onClick={onOpenSyncModal}
-            title="Sync & Connection Settings"
-            className="p-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-main)] transition-colors"
-            aria-label="Sync Settings"
-          >
-            <SlidersHorizontal className="h-4 w-4" />
           </button>
         </div>
       </div>

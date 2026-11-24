@@ -27,7 +27,7 @@ import plantHeroImage from '../assets/images/ghacem_plant_hero.jpg';
 
 interface WelcomeGateModalProps {
   isOpen: boolean;
-  onAccept: (userName: string, workId: string) => void;
+  onAccept: () => void;
   canDismiss?: boolean;
   onClose?: () => void;
 }
@@ -38,8 +38,6 @@ export const WelcomeGateModal: React.FC<WelcomeGateModalProps> = ({
   canDismiss = false,
   onClose,
 }) => {
-  const [userName, setUserName] = useState('');
-  const [workId, setWorkId] = useState('');
   const [hasAgreed, setHasAgreed] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'rules' | 'terms'>('overview');
   const [expandedSection, setExpandedSection] = useState<number | null>(0);
@@ -48,16 +46,6 @@ export const WelcomeGateModal: React.FC<WelcomeGateModalProps> = ({
 
   const acceptanceSectionRef = useRef<HTMLDivElement>(null);
 
-  // Initialize from previous saved session if available
-  useEffect(() => {
-    try {
-      const savedName = localStorage.getItem('ghacperm_terms_user_name') || '';
-      const savedId = localStorage.getItem('ghacperm_terms_work_id') || '';
-      if (savedName) setUserName(savedName);
-      if (savedId) setWorkId(savedId);
-    } catch {}
-  }, []);
-
   if (!isOpen) return null;
 
   const handleConfirm = () => {
@@ -65,12 +53,10 @@ export const WelcomeGateModal: React.FC<WelcomeGateModalProps> = ({
     try {
       localStorage.setItem('ghacperm_terms_accepted', 'true');
       localStorage.setItem('ghacperm_terms_accepted_at', new Date().toISOString());
-      if (userName.trim()) localStorage.setItem('ghacperm_terms_user_name', userName.trim());
-      if (workId.trim()) localStorage.setItem('ghacperm_terms_work_id', workId.trim());
     } catch (e) {
       console.warn('Storage unavailable:', e);
     }
-    onAccept(userName, workId);
+    onAccept();
   };
 
   const handleHeroCtaClick = () => {
@@ -168,9 +154,9 @@ export const WelcomeGateModal: React.FC<WelcomeGateModalProps> = ({
     },
     {
       id: 'audit',
-      title: 'AES-256 Cryptographic Vault',
-      tag: 'Tamper-Evident',
-      desc: 'Immutable digital logs, photo evidence, and SHA-256 seal complying with Act 328.',
+      title: 'Tamper-Evident Audit Log',
+      tag: 'ISO 45001 Record',
+      desc: 'Immutable digital logs and photographic safety evidence complying with Act 328.',
       icon: <Lock className="h-5 w-5 text-white" />,
       color: 'bg-neutral-900',
     },
@@ -595,37 +581,9 @@ export const WelcomeGateModal: React.FC<WelcomeGateModalProps> = ({
             )}
 
             {/* ============================================================== */}
-            {/* 5. USER IDENTIFICATION & MANDATORY TERMS ACCEPTANCE */}
+            {/* 5. MANDATORY TERMS ACCEPTANCE */}
             {/* ============================================================== */}
             <div className="pt-4 border-t border-neutral-200 dark:border-neutral-800 space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-[11px] font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
-                    Your Full Name <span className="font-normal text-neutral-400">(Optional)</span>
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Kwame Osei / EHS Engineer"
-                    value={userName}
-                    onChange={(e) => setUserName(e.target.value)}
-                    className="w-full rounded-lg border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-[#0E1713] px-3 py-2 text-xs text-neutral-900 dark:text-white placeholder:text-neutral-400 focus:border-[#F5B700] focus:ring-1 focus:ring-[#F5B700] outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-semibold text-neutral-700 dark:text-neutral-300 mb-1">
-                    Employee / Contractor Work ID <span className="font-normal text-neutral-400">(Optional)</span>
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="e.g. GH-10482"
-                    value={workId}
-                    onChange={(e) => setWorkId(e.target.value)}
-                    className="w-full rounded-lg border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-[#0E1713] px-3 py-2 text-xs font-mono text-neutral-900 dark:text-white placeholder:text-neutral-400 focus:border-[#F5B700] focus:ring-1 focus:ring-[#F5B700] outline-none"
-                  />
-                </div>
-              </div>
-
               {/* Mandatory Checkbox Agreement Card */}
               <label
                 className={`flex items-start gap-3 p-4 rounded-xl border cursor-pointer select-none transition-all ${

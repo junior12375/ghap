@@ -35,7 +35,6 @@ interface WorkflowSidebarProps {
   onSubmit: () => void;
   onSaveDraft: () => void;
   onClearForm: () => void;
-  onVerifySecurity: () => void;
 }
 
 export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({
@@ -57,7 +56,6 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({
   onSubmit,
   onSaveDraft,
   onClearForm,
-  onVerifySecurity,
 }) => {
   // Steps definition based on permit requirements
   const steps = [
@@ -347,15 +345,7 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({
           className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-elevated)] hover:bg-[var(--color-surface-hover)] text-[var(--color-text-main)] text-xs font-medium transition-colors"
         >
           <FileText className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
-          Save Local Encrypted Draft
-        </button>
-
-        <button
-          onClick={onVerifySecurity}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg border border-[var(--color-accent-border)] bg-[var(--color-accent-subtle)] text-[var(--color-accent)] text-xs font-medium transition-colors hover:brightness-110"
-        >
-          <ShieldCheck className="h-3.5 w-3.5" />
-          Inspect AES-256 Seal
+          Save Local Draft
         </button>
 
         <button

@@ -527,6 +527,10 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
                 <Unlock className="h-3.5 w-3.5" />
                 <span>{isSubmitting ? 'Verifying...' : 'Verify & Unlock Executive Console'}</span>
               </button>
+
+              <p className="text-[11px] text-[var(--color-text-muted)] text-center leading-relaxed pt-1">
+                Sign in with your claimed executive username or Work ID (or username <span className="font-mono font-semibold">admin</span> when configured via <span className="font-mono">EXECUTIVE_ADMIN_PASSWORD</span>).
+              </p>
             </form>
           )}
 

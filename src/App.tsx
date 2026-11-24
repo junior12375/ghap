@@ -18,13 +18,11 @@ import { RejectedPermitsView } from './components/RejectedPermitsView';
 import { AdminOperationsView } from './components/AdminOperationsView';
 import { WorkConflictDetectionView } from './components/WorkConflictDetectionView';
 import { WorkConflictInspectorModal } from './components/WorkConflictInspectorModal';
-import { SecurityVaultModal } from './components/SecurityVaultModal';
-import { SyncSettingsModal } from './components/SyncSettingsModal';
 import { PermitViewerModal } from './components/PermitViewerModal';
 import { RenewalModal } from './components/RenewalModal';
 import { WelcomeGateModal } from './components/WelcomeGateModal';
 import { GhacemLogo, HeidelbergMaterialsLogo } from './components/Logos';
-import { Flame, ArrowUpRight, ShieldCheck, Shield } from 'lucide-react';
+import { Flame, ArrowUpRight, ShieldCheck } from 'lucide-react';
 import { ConflictAnalysisResult } from './types/permit';
 import { detectWorkConflicts } from './utils/aiConflictDetector';
 import {
@@ -96,8 +94,6 @@ export default function App() {
   });
 
   // Modals State
-  const [isSecurityModalOpen, setIsSecurityModalOpen] = useState(false);
-  const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [viewerModalData, setViewerModalData] = useState<{
     isOpen: boolean;
     formType: PermitType;
@@ -153,10 +149,10 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 3000);
   }, []);
 
-  const handleAcceptTerms = useCallback((userName: string, workId: string) => {
+  const handleAcceptTerms = useCallback(() => {
     setIsWelcomeGateOpen(false);
     setIsTermsReviewMode(false);
-    showToast(`✓ Welcome to GHACPerm${userName ? `, ${userName}` : ''}. Full permit authorization access granted.`);
+    showToast('✓ Welcome to GHACPerm. Full permit authorization access granted.');
   }, [showToast]);
 
   // Save changes to localStorage
@@ -621,8 +617,6 @@ export default function App() {
           }
         }}
         syncStatus={syncStatus}
-        onOpenSyncModal={() => setIsSyncModalOpen(true)}
-        onOpenSecurityModal={() => setIsSecurityModalOpen(true)}
         onOpenTermsModal={() => {
           setIsTermsReviewMode(true);
           setIsWelcomeGateOpen(true);
@@ -765,7 +759,6 @@ export default function App() {
                     showToast('Form reset to default.');
                   }
                 }}
-                onVerifySecurity={() => setIsSecurityModalOpen(true)}
               />
             </div>
           </div>
@@ -878,7 +871,7 @@ export default function App() {
               GHACPerm Terms &amp; Safety Policy
             </button>
             <div className="font-mono text-[11px] text-[var(--color-text-muted)]">
-              AES-256 Secured Document Architecture · ISO 45001 EHS Compliant
+              GHACEM Corporate PTW · ISO 45001 EHS Compliant
             </div>
           </div>
         </div>
@@ -895,22 +888,6 @@ export default function App() {
           }
         }}
         onAccept={handleAcceptTerms}
-      />
-
-      {/* Security Vault Modal */}
-      <SecurityVaultModal
-        isOpen={isSecurityModalOpen}
-        onClose={() => setIsSecurityModalOpen(false)}
-        currentPermitState={permitState}
-      />
-
-      {/* Sync & Connection Settings Modal */}
-      <SyncSettingsModal
-        isOpen={isSyncModalOpen}
-        onClose={() => setIsSyncModalOpen(false)}
-        syncStatus={syncStatus}
-        onSyncStatusChange={setSyncStatus}
-        onTriggerFullRefresh={loadCloudHistory}
       />
 
       {/* Official Read-Only Permit Viewer Modal */}
