@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
+import nodemailer from 'nodemailer';
 
 dotenv.config();
 
@@ -766,6 +767,352 @@ Audit Requirements:
     return res.status(statusCode).json({
       ok: false,
       error: `AI conflict analysis failed: ${errMessage}`,
+    });
+  }
+});
+
+// ============================================================================
+// Automatic Silent Server-Side Email Notification System
+// Recipient addresses stay strictly server-side (never exposed to browser UI)
+// ============================================================================
+const EHS_ALERT_EMAIL = (process.env.EHS_ALERT_EMAIL || 'sebastianerchiejnr4@gmail.com').trim();
+const HOD_ALERT_EMAIL = (process.env.HOD_ALERT_EMAIL || 'oseiemmanue67@gmail.com').trim();
+
+type NotificationEvent =
+  | 'permit_submitted'
+  | 'ehs_confined_alert'
+  | 'permit_closed'
+  | 'permit_approved'
+  | 'permit_rejected';
+
+interface NotificationEmailBody {
+  event?: NotificationEvent;
+  formType?: 'general' | 'hotwork' | 'height';
+  submissionId?: string;
+  workOrder?: string;
+  location?: string;
+  department?: string;
+  equipmentId?: string;
+  description?: string;
+  supervisorName?: string;
+  supervisorWorkId?: string;
+  closedBy?: string;
+  closureRemarks?: string;
+  reviewerName?: string;
+  decisionRemarks?: string;
+  rejectionReason?: string;
+  verificationUrl?: string;
+}
+
+function escapeHtml(input: string): string {
+  return input
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+const DEFAULT_APPS_SCRIPT_URL =
+  'https://script.google.com/macros/s/AKfycbz8L1Izxu4dXNaQ9uIgwIGLtxT9o3N8w3kNA7cba2r27YD3YSfEIahLCs4fkQ5W_Igv/exec';
+
+function buildFallbackReviewUrl(
+  formType: string,
+  submissionId: string,
+  workOrder: string,
+  mode: 'review' | 'ehs_test' = 'review'
+): string {
+  const customPublic = (process.env.APP_PUBLIC_URL || process.env.PUBLIC_PORTAL_URL || '').trim();
+  if (
+    mode === 'review' &&
+    customPublic &&
+    !customPublic.includes('ais-dev-') &&
+    !customPublic.includes('ais-pre-')
+  ) {
+    try {
+      const url = new URL(customPublic);
+      url.searchParams.set('permit', formType);
+      url.searchParams.set('id', submissionId);
+      if (workOrder && workOrder !== 'UNSPECIFIED') {
+        url.searchParams.set('workorder', workOrder);
+      }
+      url.searchParams.set('review', '1');
+      return url.toString();
+    } catch {
+      return `${customPublic}?permit=${encodeURIComponent(formType)}&id=${encodeURIComponent(submissionId)}&review=1`;
+    }
+  }
+
+  const scriptBase = (process.env.APPS_SCRIPT_URL || DEFAULT_APPS_SCRIPT_URL).trim();
+  try {
+    const url = new URL(scriptBase);
+    url.searchParams.set('mode', mode);
+    url.searchParams.set('permit', formType);
+    url.searchParams.set('id', submissionId);
+    if (workOrder && workOrder !== 'UNSPECIFIED') {
+      url.searchParams.set('workorder', workOrder);
+    }
+    return url.toString();
+  } catch {
+    return `${scriptBase}?mode=${mode}&permit=${encodeURIComponent(formType)}&id=${encodeURIComponent(submissionId)}`;
+  }
+}
+
+function buildNotificationEmailContent(payload: NotificationEmailBody): {
+  recipients: string[];
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const allowedEvents: NotificationEvent[] = [
+    'permit_submitted',
+    'ehs_confined_alert',
+    'permit_closed',
+    'permit_approved',
+    'permit_rejected',
+  ];
+  const event: NotificationEvent =
+    payload.event && allowedEvents.includes(payload.event) ? payload.event : 'permit_submitted';
+
+  const formType = payload.formType || 'general';
+  const formLabel =
+    formType === 'hotwork'
+      ? 'Hot Work / Confined Space / Silo Entry (04B)'
+      : formType === 'height'
+      ? 'Working at Height (04C)'
+      : 'General Work Permit (04A)';
+
+  const subId = (payload.submissionId || 'N/A').trim();
+  const wo = (payload.workOrder || 'UNSPECIFIED').trim();
+  const loc = (payload.location || 'Plant Grounds').trim();
+  const dept = (payload.department || 'Plant Operations').trim();
+  const eq = (payload.equipmentId || 'N/A').trim();
+  const desc = (payload.description || 'Scheduled plant maintenance').trim();
+  const supName = (payload.supervisorName || 'Authorized Supervisor').trim();
+  const supId = (payload.supervisorWorkId || 'Verified').trim();
+  const timestamp = new Date().toISOString();
+  const desiredMode: 'review' | 'ehs_test' = event === 'ehs_confined_alert' ? 'ehs_test' : 'review';
+  const providedUrl = (payload.verificationUrl || '').trim();
+  const isUnreachablePreviewUrl =
+    !providedUrl || providedUrl.includes('ais-dev-') || providedUrl.includes('ais-pre-');
+  const actionUrl = isUnreachablePreviewUrl
+    ? buildFallbackReviewUrl(formType, subId, wo, desiredMode)
+    : providedUrl;
+
+  let recipients: string[] = [HOD_ALERT_EMAIL];
+  let subject = `[GHACPerm] Permit Submitted for Approval - WO #${wo} (${subId})`;
+  let bannerColor = '#0f8a3c';
+  let heading = 'Permit Submitted for Authorization';
+  let intro = 'A Permit-to-Work has been submitted and awaits review. Use the button below to open the permit and approve or reject it with a reason.';
+  let ctaLabel = 'Open Permit to Approve or Reject';
+
+  if (event === 'ehs_confined_alert') {
+    recipients = [EHS_ALERT_EMAIL];
+    subject = `[RED PROTOCOL ALERT] Enter EHS Confined Space Gas Test Results - WO #${wo} (${loc})`;
+    bannerColor = '#c5221f';
+    heading = 'RED PROTOCOL: EHS Atmospheric Gas Test Required';
+    intro =
+      'An on-site EHS Atmospheric Gas Test (O2, LEL, CO, Temperature) is required prior to Confined Space / Silo Entry. Click the button below to enter and submit the gas test readings.';
+    ctaLabel = 'Enter Atmospheric Gas Test Results';
+  } else if (event === 'permit_closed') {
+    recipients = [HOD_ALERT_EMAIL, EHS_ALERT_EMAIL];
+    subject = `[GHACPerm Closed] Work Completed & Handed Back - WO #${wo} (${subId})`;
+    bannerColor = '#1d4ed8';
+    heading = 'Permit Closed & Handed Back';
+    intro = `Work under this permit has been marked completed and closed by ${payload.closedBy || 'Executive Operations'}.`;
+    ctaLabel = 'View Closed Permit Record';
+  } else if (event === 'permit_approved') {
+    recipients = [HOD_ALERT_EMAIL, EHS_ALERT_EMAIL];
+    subject = `[GHACPerm APPROVED] Permit Authorized - WO #${wo} (${subId})`;
+    bannerColor = '#0f8a3c';
+    heading = 'Permit Formally Approved';
+    intro = `This Permit-to-Work has been approved by ${payload.reviewerName || 'Head of Department (HoD)'}.`;
+    ctaLabel = 'Open Permit Record';
+  } else if (event === 'permit_rejected') {
+    recipients = [HOD_ALERT_EMAIL, EHS_ALERT_EMAIL];
+    subject = `[GHACPerm REJECTED] Permit Denied - WO #${wo} (${subId})`;
+    bannerColor = '#c5221f';
+    heading = 'Permit Formally Rejected';
+    intro = `This Permit-to-Work was rejected by ${payload.reviewerName || 'Head of Department (HoD)'}.`;
+    ctaLabel = 'View Rejection Details';
+  } else if (formType === 'hotwork') {
+    recipients = [HOD_ALERT_EMAIL, EHS_ALERT_EMAIL];
+    subject = `[GHACPerm RED PROTOCOL] Hot Work / Entry Permit Submitted - WO #${wo} (${subId})`;
+    bannerColor = '#c5221f';
+    heading = 'High-Risk Red Protocol Permit Submitted';
+    intro =
+      'A High-Risk Hot Work / Confined Space permit has been submitted for authorization. Click the button below to open the permit and approve or reject it with a reason.';
+    ctaLabel = 'Open Permit to Approve or Reject';
+  }
+
+  const uniqueRecipients = Array.from(new Set(recipients.filter(Boolean)));
+
+  const detailsRows: Array<[string, string]> = [
+    ['Permit Classification', formLabel],
+    ['Submission ID', subId],
+    ['Work Order Number', wo],
+    ['Location', loc],
+    ['Department', dept],
+    ['Equipment ID', eq],
+    ['Work Scope', desc],
+    ['Site Supervisor', `${supName} (${supId})`],
+    ...(event === 'permit_closed'
+      ? [
+          ['Closed By', payload.closedBy || 'Executive Operations'] as [string, string],
+          ['Handback Remarks', payload.closureRemarks || 'Work completed safely'] as [string, string],
+        ]
+      : []),
+    ...(event === 'permit_approved'
+      ? [
+          ['Approved By', payload.reviewerName || 'Head of Department (HoD)'] as [string, string],
+          ...(payload.decisionRemarks
+            ? ([['Approval Remarks', payload.decisionRemarks]] as Array<[string, string]>)
+            : []),
+        ]
+      : []),
+    ...(event === 'permit_rejected'
+      ? [
+          ['Rejected By', payload.reviewerName || 'Head of Department (HoD)'] as [string, string],
+          ['Rejection Reason', payload.rejectionReason || 'No reason provided'] as [string, string],
+        ]
+      : []),
+    ['Timestamp (UTC)', timestamp],
+  ];
+
+  const textLines = [
+    'GHACEM CORPORATE PERMIT-TO-WORK (GHACPerm)',
+    heading.toUpperCase(),
+    '============================================================',
+    intro,
+    '',
+    ...detailsRows.map(([k, v]) => `${k.padEnd(22, ' ')}: ${v}`),
+    `Review / Action Link  : ${actionUrl}`,
+    '',
+    '-- Automated Dispatch from GHACPerm Corporate Safety System',
+  ];
+
+  const htmlRows = detailsRows
+    .map(
+      ([k, v]) =>
+        `<tr><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-weight:600;color:#374151;width:180px;">${escapeHtml(k)}</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#111827;">${escapeHtml(v)}</td></tr>`
+    )
+    .join('');
+
+  const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;background:#ffffff;">
+      <div style="background:${bannerColor};color:#ffffff;padding:18px 22px;">
+        <div style="font-size:11px;letter-spacing:1.2px;text-transform:uppercase;opacity:0.9;">GHACEM Corporate Permit-to-Work</div>
+        <h2 style="margin:6px 0 0;font-size:18px;line-height:1.3;">${escapeHtml(heading)}</h2>
+      </div>
+      <div style="padding:20px 22px;color:#1f2937;font-size:14px;line-height:1.5;">
+        <p style="margin-top:0;">${escapeHtml(intro)}</p>
+        <div style="margin:20px 0;text-align:center;">
+          <a href="${escapeHtml(actionUrl)}" style="display:inline-block;background:${bannerColor};color:#ffffff;text-decoration:none;padding:13px 24px;border-radius:8px;font-weight:bold;font-size:14px;letter-spacing:0.2px;">${escapeHtml(ctaLabel)}</a>
+        </div>
+        <table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:13px;border:1px solid #e5e7eb;">
+          ${htmlRows}
+        </table>
+        <p style="margin:12px 0 0;font-size:12px;color:#6b7280;word-break:break-all;">
+          Direct Permit Link: <a href="${escapeHtml(actionUrl)}" style="color:${bannerColor};">${escapeHtml(actionUrl)}</a>
+        </p>
+      </div>
+      <div style="background:#f9fafb;padding:12px 22px;font-size:11px;color:#6b7280;border-top:1px solid #e5e7eb;">
+        Automated notification dispatched by GHACPerm ISO 45001 Safety System.
+      </div>
+    </div>
+  `;
+
+  return {
+    recipients: uniqueRecipients,
+    subject,
+    text: textLines.join('\n'),
+    html,
+  };
+}
+
+app.post('/api/notifications/email', async (req: Request, res: Response) => {
+  try {
+    const payload = (req.body || {}) as NotificationEmailBody;
+    const { recipients, subject, text, html } = buildNotificationEmailContent(payload);
+
+    // 1. Try Resend HTTPS API if configured
+    const resendKey = (process.env.RESEND_API_KEY || '').trim();
+    if (resendKey) {
+      const fromAddr = (process.env.EMAIL_FROM || 'GHACPerm Safety System <onboarding@resend.dev>').trim();
+      const resendResp = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${resendKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: fromAddr,
+          to: recipients,
+          subject,
+          text,
+          html,
+        }),
+      });
+
+      if (resendResp.ok) {
+        return res.json({ ok: true, deliveredByServer: true, transport: 'resend' });
+      }
+      const errText = await resendResp.text().catch(() => '');
+      console.warn('Resend dispatch failed, checking SMTP fallback:', errText);
+    }
+
+    // 2. Try Nodemailer SMTP (Gmail App Password or custom SMTP) if configured
+    const smtpUser = (process.env.SMTP_USER || '').trim();
+    const smtpPass = (process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD || '').trim();
+    if (smtpUser && smtpPass) {
+      const smtpHost = (process.env.SMTP_HOST || 'smtp.gmail.com').trim();
+      const smtpPort = parseInt(process.env.SMTP_PORT || '465', 10);
+      const transporter = nodemailer.createTransport({
+        host: smtpHost,
+        port: Number.isNaN(smtpPort) ? 465 : smtpPort,
+        secure: (Number.isNaN(smtpPort) ? 465 : smtpPort) === 465,
+        auth: {
+          user: smtpUser,
+          pass: smtpPass,
+        },
+      });
+
+      await transporter.sendMail({
+        from: (process.env.EMAIL_FROM || `GHACPerm Safety System <${smtpUser}>`).trim(),
+        to: recipients.join(', '),
+        subject,
+        text,
+        html,
+      });
+
+      return res.json({ ok: true, deliveredByServer: true, transport: 'smtp' });
+    }
+
+    // 3. Try custom HTTPS Email Webhook if configured
+    const webhookUrl = (process.env.EMAIL_WEBHOOK_URL || '').trim();
+    if (webhookUrl) {
+      const hookResp = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: recipients, subject, text, html, event: payload.event }),
+      });
+      if (hookResp.ok) {
+        return res.json({ ok: true, deliveredByServer: true, transport: 'webhook' });
+      }
+    }
+
+    // 4. Signal client that Google Apps Script MailApp fallback should handle delivery
+    return res.json({
+      ok: true,
+      deliveredByServer: false,
+      transport: 'apps_script_fallback',
+    });
+  } catch (err) {
+    console.error('Error in /api/notifications/email:', err);
+    return res.status(500).json({
+      ok: false,
+      deliveredByServer: false,
+      error: err instanceof Error ? err.message : String(err),
     });
   }
 });

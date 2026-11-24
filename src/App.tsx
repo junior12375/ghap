@@ -5,9 +5,10 @@
  * AES-GCM 256 document encryption vault, and cross-device cloud synchronization.
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { AllPermitState, HistoryRecord, PermitType, SyncStatusInfo } from './types/permit';
-import { DEFAULT_PERMIT_STATE } from './data/defaults';
+import { DEFAULT_PERMIT_STATE, createFreshPermitDefaults } from './data/defaults';
+import { BASELINE_PLANT_RECORDS } from './data/plantAuditRecords';
 import { Header } from './components/Header';
 import { WorkflowSidebar } from './components/WorkflowSidebar';
 import { GeneralWorkPermitForm } from './components/GeneralWorkPermitForm';
@@ -38,6 +39,8 @@ import {
   addToOutbox,
   flushOutboxQueue,
   getOutboxQueue,
+  buildPermitVerificationUrl,
+  dispatchSilentEmailNotification,
 } from './utils/syncEngine';
 import {
   flattenGeneral,
@@ -48,7 +51,67 @@ import {
 } from './utils/permitHelpers';
 
 const LOCAL_STORAGE_PERMIT_KEY = 'ghacem_corporate_permits_data';
+const LOCAL_RECORD_OVERRIDES_KEY = 'ghacem_local_record_overrides';
 const THEME_STORAGE_KEY = 'ghacem_corporate_theme';
+
+type RecordOverridesMap = Record<PermitType, Record<string, HistoryRecord>>;
+
+function loadLocalRecordOverrides(): RecordOverridesMap {
+  try {
+    const raw = localStorage.getItem(LOCAL_RECORD_OVERRIDES_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<RecordOverridesMap>;
+      return {
+        general: parsed.general || {},
+        hotwork: parsed.hotwork || {},
+        height: parsed.height || {},
+      };
+    }
+  } catch {}
+  return { general: {}, hotwork: {}, height: {} };
+}
+
+function saveLocalRecordOverride(formType: PermitType, submissionId: string, record: HistoryRecord): void {
+  try {
+    const current = loadLocalRecordOverrides();
+    current[formType][submissionId] = record;
+    localStorage.setItem(LOCAL_RECORD_OVERRIDES_KEY, JSON.stringify(current));
+  } catch {}
+}
+
+function mergeRecordsWithOverrides(
+  formType: PermitType,
+  remoteRecords: HistoryRecord[]
+): HistoryRecord[] {
+  const overrides = loadLocalRecordOverrides()[formType];
+  const merged: HistoryRecord[] = [];
+  const seenIds = new Set<string>();
+
+  for (const rec of remoteRecords) {
+    const id = String(rec['Submission ID'] || '');
+    if (id && overrides[id]) {
+      const localTs = Date.parse(String(overrides[id]['Last Updated'] || '')) || 0;
+      const remoteTs = Date.parse(String(rec['Last Updated'] || '')) || 0;
+      if (localTs > remoteTs) {
+        merged.push({ ...rec, ...overrides[id] });
+      } else {
+        merged.push({ ...overrides[id], ...rec });
+      }
+      seenIds.add(id);
+    } else {
+      merged.push(rec);
+      if (id) seenIds.add(id);
+    }
+  }
+
+  for (const [id, rec] of Object.entries(overrides)) {
+    if (!seenIds.has(id)) {
+      merged.unshift(rec);
+    }
+  }
+
+  return merged;
+}
 
 export default function App() {
   // Navigation State
@@ -99,12 +162,14 @@ export default function App() {
     formType: PermitType;
     record: HistoryRecord | null;
     submissionId: string;
+    canReview?: boolean;
     relatedPermits?: Array<{ formType: PermitType; record: HistoryRecord; id: string }>;
   }>({
     isOpen: false,
     formType: 'general',
     record: null,
     submissionId: '',
+    canReview: false,
   });
 
   const [renewalModalData, setRenewalModalData] = useState<{
@@ -134,9 +199,18 @@ export default function App() {
   const [conflictModalTarget, setConflictModalTarget] = useState<PermitType>('general');
   const [conflictSource, setConflictSource] = useState<string>('gemini-4-hydrogen');
 
-  // Welcome Gate & Mandatory Terms State - Automatically the first page to see before the permit
-  const [isWelcomeGateOpen, setIsWelcomeGateOpen] = useState<boolean>(true);
+  // Welcome Gate & Mandatory Terms State - Automatically bypassed when opening a permit review link from email
+  const [isWelcomeGateOpen, setIsWelcomeGateOpen] = useState<boolean>(() => {
+    try {
+      const p = new URLSearchParams(window.location.search);
+      const hasPermit = Boolean(p.get('permit') && p.get('id'));
+      return !hasPermit;
+    } catch {
+      return true;
+    }
+  });
   const [isTermsReviewMode, setIsTermsReviewMode] = useState<boolean>(false);
+  const deepLinkOpenedRef = useRef<string | null>(null);
 
   // UI Toast Feedback
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -154,6 +228,46 @@ export default function App() {
     setIsTermsReviewMode(false);
     showToast('✓ Welcome to GHACPerm. Full permit authorization access granted.');
   }, [showToast]);
+
+  const extractPermitMeta = useCallback(
+    (targetType: PermitType) => {
+      if (targetType === 'general') {
+        const g = permitState.general;
+        return {
+          workOrder: g.workOrderNumber,
+          location: g.deptLocation,
+          department: g.department,
+          equipmentId: '',
+          description: g.description,
+          supervisorName: g.authSig?.name || '',
+          supervisorWorkId: g.authSig?.workId || '',
+        };
+      }
+      if (targetType === 'hotwork') {
+        const h = permitState.hotwork;
+        return {
+          workOrder: h.workOrderNumber,
+          location: h.location,
+          department: h.department,
+          equipmentId: h.equipmentId,
+          description: h.purpose || h.typeOfWork.join(', '),
+          supervisorName: h.safeCommenceMgr?.name || '',
+          supervisorWorkId: h.safeCommenceMgr?.workId || '',
+        };
+      }
+      const ht = permitState.height;
+      return {
+        workOrder: ht.workOrderNo,
+        location: ht.location,
+        department: ht.department,
+        equipmentId: ht.equipmentId,
+        description: ht.description,
+        supervisorName: ht.authMgr?.name || '',
+        supervisorWorkId: ht.authMgr?.workId || '',
+      };
+    },
+    [permitState]
+  );
 
   // Save changes to localStorage
   useEffect(() => {
@@ -187,9 +301,9 @@ export default function App() {
       ]);
 
       setHistoryCache({
-        general: gRes.ok && gRes.records ? gRes.records : [],
-        hotwork: hRes.ok && hRes.records ? hRes.records : [],
-        height: htRes.ok && htRes.records ? htRes.records : [],
+        general: mergeRecordsWithOverrides('general', gRes.ok && gRes.records ? gRes.records : []),
+        hotwork: mergeRecordsWithOverrides('hotwork', hRes.ok && hRes.records ? hRes.records : []),
+        height: mergeRecordsWithOverrides('height', htRes.ok && htRes.records ? htRes.records : []),
       });
 
       const outbox = getOutboxQueue();
@@ -201,6 +315,11 @@ export default function App() {
       });
     } catch (e) {
       console.warn('Backend fetch failed, using local offline cache:', e);
+      setHistoryCache({
+        general: mergeRecordsWithOverrides('general', []),
+        hotwork: mergeRecordsWithOverrides('hotwork', []),
+        height: mergeRecordsWithOverrides('height', []),
+      });
       setSyncStatus((prev) => ({
         ...prev,
         state: 'offline',
@@ -237,21 +356,34 @@ export default function App() {
     };
   }, [loadCloudHistory, showToast]);
 
-  // Deep Link & QR Code Parameter Handler
+  // Deep Link & Email Review Button Parameter Handler
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const linkType = params.get('permit') as PermitType | null;
     const linkId = params.get('id');
+    const isReviewLink = params.get('review') === '1' || params.get('action') === 'review';
 
     if (linkType && linkId && ['general', 'hotwork', 'height'].includes(linkType)) {
-      // Find matching record
-      const match = (historyCache[linkType] || []).find((r) => String(r['Submission ID'] || '') === linkId);
+      const deepLinkKey = `${linkType}:${linkId}`;
+      if (deepLinkOpenedRef.current === deepLinkKey) return;
+
+      const matchFromCache = (historyCache[linkType] || []).find(
+        (r) => String(r['Submission ID'] || '') === linkId
+      );
+      const matchFromBaseline = BASELINE_PLANT_RECORDS.find(
+        (b) => b.formType === linkType && b.id === linkId
+      )?.record;
+      const match = matchFromCache || matchFromBaseline;
+
       if (match) {
+        deepLinkOpenedRef.current = deepLinkKey;
+        setIsWelcomeGateOpen(false);
         setViewerModalData({
           isOpen: true,
           formType: linkType,
           record: match,
           submissionId: linkId,
+          canReview: isReviewLink || true,
         });
       }
     }
@@ -447,19 +579,44 @@ export default function App() {
     else if (formType === 'hotwork') flatData = flattenHotwork(permitState.hotwork);
     else flatData = flattenHeight(permitState.height);
 
+    const meta = extractPermitMeta(formType);
+    const verificationUrl = buildPermitVerificationUrl(formType, submissionId, meta.workOrder, { review: true });
     flatData['Submission ID'] = submissionId;
+    flatData['Verification URL'] = verificationUrl;
+
+    const emailResult = await dispatchSilentEmailNotification({
+      event: 'permit_submitted',
+      formType,
+      submissionId,
+      workOrder: meta.workOrder,
+      location: meta.location,
+      department: meta.department,
+      equipmentId: meta.equipmentId,
+      description: meta.description,
+      supervisorName: meta.supervisorName,
+      supervisorWorkId: meta.supervisorWorkId,
+      verificationUrl,
+    });
+
+    const recordSnapshot: HistoryRecord = {
+      ...flatData,
+      'Submission ID': submissionId,
+      'Last Updated': new Date().toISOString(),
+    };
+    saveLocalRecordOverride(formType, submissionId, recordSnapshot);
 
     try {
       const res = await postToBackend({
         formType,
         action: 'submit',
         submissionId,
+        skipAppsScriptEmail: emailResult.deliveredByServer,
         data: flatData,
       });
 
       if (res && res.ok) {
         handleFormChange(formType, { _submissionId: submissionId } as unknown as Partial<AllPermitState[typeof formType]>);
-        showToast(`✓ Permit ${submissionId} submitted to workflow.`);
+        showToast(`✓ Permit ${submissionId} submitted & automatic notifications dispatched.`);
         await loadCloudHistory();
       } else {
         // Queue to Outbox for resilient offline sync
@@ -474,6 +631,7 @@ export default function App() {
           ...prev,
           pendingQueueCount: prev.pendingQueueCount + 1,
         }));
+        await loadCloudHistory();
         showToast(`Stored in local offline queue. Will sync automatically once online.`);
       }
     } catch {
@@ -488,13 +646,14 @@ export default function App() {
         ...prev,
         pendingQueueCount: prev.pendingQueueCount + 1,
       }));
+      await loadCloudHistory();
       showToast(`Permit saved locally in encrypted outbox.`);
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // Notify EHS for Confined Space Entry Test
+  // Notify EHS for Confined Space Entry Test (automatic silent dispatch)
   const handleNotifyEhsConfined = async () => {
     const h = permitState.hotwork;
     const supervisorWorkId = h.safeCommenceMgr?.workId || '';
@@ -507,7 +666,7 @@ export default function App() {
     }
 
     setIsNotifyingEhs(true);
-    setNotifyStatusMessage('Saving permit and dispatching EHS alert...');
+    setNotifyStatusMessage('Saving permit and dispatching automatic EHS Red Protocol alert...');
 
     try {
       let subId = h._submissionId?.trim();
@@ -516,13 +675,40 @@ export default function App() {
         handleFormChange('hotwork', { _submissionId: subId });
       }
 
+      const ehsTestUrl = buildPermitVerificationUrl('hotwork', subId, h.workOrderNumber, { ehsGasTest: true });
+      const reviewUrl = buildPermitVerificationUrl('hotwork', subId, h.workOrderNumber, { review: true });
       const flatData = flattenHotwork(h);
       flatData['Submission ID'] = subId;
+      flatData['Department Authorization'] = 'Approved';
+      flatData['EHS Test Status'] = 'Requested';
+      flatData['EHS Alert Dispatched At'] = new Date().toISOString();
+      flatData['EHS Test URL'] = ehsTestUrl;
+      flatData['Verification URL'] = reviewUrl;
+
+      saveLocalRecordOverride('hotwork', subId, {
+        ...flatData,
+        'Last Updated': new Date().toISOString(),
+      });
+
+      const emailResult = await dispatchSilentEmailNotification({
+        event: 'ehs_confined_alert',
+        formType: 'hotwork',
+        submissionId: subId,
+        workOrder: h.workOrderNumber,
+        location: h.location,
+        department: h.department,
+        equipmentId: h.equipmentId,
+        description: h.purpose || h.typeOfWork.join(', '),
+        supervisorName,
+        supervisorWorkId,
+        verificationUrl: ehsTestUrl,
+      });
 
       await postToBackend({
         formType: 'hotwork',
         action: 'submit',
         submissionId: subId,
+        skipAppsScriptEmail: true,
         data: flatData,
       });
 
@@ -530,25 +716,307 @@ export default function App() {
         action: 'request_ehs_test',
         formType: 'hotwork',
         submissionId: subId,
+        skipAppsScriptEmail: emailResult.deliveredByServer,
         data: {
           'Supervisor Work ID': supervisorWorkId,
           'Approved By': supervisorName,
+          'EHS Test URL': ehsTestUrl,
+          'Verification URL': reviewUrl,
         },
       });
 
       if (r && r.ok) {
         const fieldCodeMsg = r.hodFieldCode ? ` Field Authorization Code: ${r.hodFieldCode}` : '';
-        setNotifyStatusMessage(`✓ Site Supervisor authorized. EHS alerted via secure dispatch.${fieldCodeMsg}`);
-        showToast('✓ EHS notified for confined space test.');
+        setNotifyStatusMessage(`✓ Site Supervisor authorized. EHS Red Protocol alert dispatched automatically.${fieldCodeMsg}`);
+        showToast('✓ EHS notified automatically for confined space test.');
         await loadCloudHistory();
       } else {
-        setNotifyStatusMessage(`Dispatch issue: ${r?.error || 'Failed to send EHS notification.'}`);
+        await addToOutbox({
+          formType: 'hotwork',
+          action: 'request_ehs_test',
+          submissionId: subId,
+          data: {
+            ...flatData,
+            'Supervisor Work ID': supervisorWorkId,
+            'Approved By': supervisorName,
+          },
+        });
+        await loadCloudHistory();
+        setNotifyStatusMessage(
+          emailResult.deliveredByServer
+            ? '✓ EHS Red Protocol alert dispatched automatically. Permit update queued for sheet sync.'
+            : '✓ EHS notification recorded and queued for automatic sync.'
+        );
+        showToast('✓ EHS notification dispatched.');
       }
     } catch (e) {
-      setNotifyStatusMessage(`Network error during dispatch: ${String(e)}`);
+      setNotifyStatusMessage(`Dispatch queued locally (${String(e)}).`);
     } finally {
       setIsNotifyingEhs(false);
     }
+  };
+
+  // Close Active Permit from Executive Operations after work is completed
+  const handleClosePermitFromExecutive = async (
+    targetType: PermitType,
+    submissionId: string,
+    existingRecord: HistoryRecord,
+    details: { closedBy: string; remarks: string }
+  ) => {
+    const closedAtDisplay = new Date().toLocaleString();
+    const closedAtIso = new Date().toISOString();
+
+    const closedRecord: HistoryRecord = {
+      ...existingRecord,
+      'Submission ID': submissionId,
+      Status: 'Closed',
+      'Closed By': details.closedBy,
+      'Closed At': closedAtDisplay,
+      'Closure Remarks': details.remarks,
+      'Last Updated': closedAtIso,
+    };
+
+    if (targetType === 'general') {
+      closedRecord['Completion Signed By'] = existingRecord['Completion Signed By'] || details.closedBy;
+      closedRecord['Completion Signed At'] = existingRecord['Completion Signed At'] || closedAtDisplay;
+    } else if (targetType === 'hotwork') {
+      closedRecord['Sign Off - Mgr'] = existingRecord['Sign Off - Mgr'] || details.closedBy;
+      closedRecord['Sign Off - Mgr At'] = existingRecord['Sign Off - Mgr At'] || closedAtDisplay;
+      closedRecord['Sign Off - Crew'] = existingRecord['Sign Off - Crew'] || details.closedBy;
+      closedRecord['Sign Off - Crew At'] = existingRecord['Sign Off - Crew At'] || closedAtDisplay;
+    } else if (targetType === 'height') {
+      closedRecord['Closure - Mgr'] = existingRecord['Closure - Mgr'] || details.closedBy;
+      closedRecord['Closure - Mgr At'] = existingRecord['Closure - Mgr At'] || closedAtDisplay;
+      closedRecord['Closure - Crew'] = existingRecord['Closure - Crew'] || details.closedBy;
+      closedRecord['Closure - Crew At'] = existingRecord['Closure - Crew At'] || closedAtDisplay;
+    }
+
+    // 1. Update local state & persistence immediately so Executive table updates right away
+    saveLocalRecordOverride(targetType, submissionId, closedRecord);
+    setHistoryCache((prev) => ({
+      ...prev,
+      [targetType]: mergeRecordsWithOverrides(targetType, prev[targetType] || []),
+    }));
+
+    const wo = String(
+      targetType === 'height'
+        ? existingRecord['Work Order No.'] || existingRecord['workOrderNo'] || ''
+        : existingRecord['Work Order Number'] || existingRecord['workOrderNumber'] || ''
+    );
+    const loc = String(existingRecord['Location'] || existingRecord['Department/Location'] || 'Plant Grounds');
+
+    // 2. Dispatch automatic background closure email
+    const emailResult = await dispatchSilentEmailNotification({
+      event: 'permit_closed',
+      formType: targetType,
+      submissionId,
+      workOrder: wo,
+      location: loc,
+      department: String(existingRecord['Department'] || ''),
+      equipmentId: String(existingRecord['Equipment ID'] || existingRecord['equipmentId'] || ''),
+      description: String(existingRecord['Description'] || existingRecord['Purpose'] || ''),
+      closedBy: details.closedBy,
+      closureRemarks: details.remarks,
+      verificationUrl: buildPermitVerificationUrl(targetType, submissionId, wo),
+    });
+
+    // 3. Persist closure to Google Sheets backend (or outbox if offline)
+    const res = await postToBackend({
+      formType: targetType,
+      action: 'close',
+      submissionId,
+      skipAppsScriptEmail: emailResult.deliveredByServer,
+      data: closedRecord,
+    });
+
+    if (!res || !res.ok) {
+      await addToOutbox({
+        formType: targetType,
+        action: 'close',
+        submissionId,
+        data: closedRecord,
+      });
+      setSyncStatus((prev) => ({
+        ...prev,
+        pendingQueueCount: prev.pendingQueueCount + 1,
+      }));
+    } else {
+      await loadCloudHistory();
+    }
+
+    showToast(`✓ Permit ${submissionId} closed and handed back.`);
+  };
+
+  // HoD / EHS Permit Approval Decision (from email review button or executive viewer)
+  const handleApprovePermitDecision = async (
+    targetType: PermitType,
+    submissionId: string,
+    existingRecord: HistoryRecord,
+    details: { reviewerName: string; remarks: string }
+  ) => {
+    const decidedAtDisplay = new Date().toLocaleString();
+    const decidedAtIso = new Date().toISOString();
+
+    const approvedRecord: HistoryRecord = {
+      ...existingRecord,
+      'Submission ID': submissionId,
+      'HoD Approval': 'Approved',
+      'Approval Status': 'Approved',
+      'Permit Status': 'Approved',
+      Status: 'Active',
+      'HoD Approved By': details.reviewerName,
+      'HoD Rejected By': '',
+      'HoD Rejection Reason': '',
+      'Rejection Reason': '',
+      'HoD Decision Remarks': details.remarks,
+      'HoD Approval At': decidedAtDisplay,
+      'Last Updated': decidedAtIso,
+    };
+
+    saveLocalRecordOverride(targetType, submissionId, approvedRecord);
+    setHistoryCache((prev) => ({
+      ...prev,
+      [targetType]: mergeRecordsWithOverrides(targetType, prev[targetType] || []),
+    }));
+    setViewerModalData((prev) =>
+      prev.submissionId === submissionId ? { ...prev, record: approvedRecord } : prev
+    );
+
+    const wo = String(
+      targetType === 'height'
+        ? existingRecord['Work Order No.'] || existingRecord['workOrderNo'] || ''
+        : existingRecord['Work Order Number'] || existingRecord['workOrderNumber'] || ''
+    );
+    const loc = String(existingRecord['Location'] || existingRecord['Department/Location'] || 'Plant Grounds');
+    const verificationUrl = buildPermitVerificationUrl(targetType, submissionId, wo, { review: true });
+
+    const emailResult = await dispatchSilentEmailNotification({
+      event: 'permit_approved',
+      formType: targetType,
+      submissionId,
+      workOrder: wo,
+      location: loc,
+      department: String(existingRecord['Department'] || ''),
+      equipmentId: String(existingRecord['Equipment ID'] || existingRecord['equipmentId'] || ''),
+      description: String(existingRecord['Description'] || existingRecord['Purpose'] || ''),
+      reviewerName: details.reviewerName,
+      decisionRemarks: details.remarks,
+      verificationUrl,
+    });
+
+    const res = await postToBackend({
+      formType: targetType,
+      action: 'hod_decision',
+      submissionId,
+      skipAppsScriptEmail: emailResult.deliveredByServer,
+      data: {
+        ...approvedRecord,
+        'Verification URL': verificationUrl,
+      },
+    });
+
+    if (!res || !res.ok) {
+      await addToOutbox({
+        formType: targetType,
+        action: 'hod_decision',
+        submissionId,
+        data: approvedRecord,
+      });
+      setSyncStatus((prev) => ({
+        ...prev,
+        pendingQueueCount: prev.pendingQueueCount + 1,
+      }));
+    } else {
+      await loadCloudHistory();
+    }
+
+    showToast(`✓ Permit ${submissionId} approved.`);
+  };
+
+  // HoD / EHS Permit Rejection with Reason Decision
+  const handleRejectPermitDecision = async (
+    targetType: PermitType,
+    submissionId: string,
+    existingRecord: HistoryRecord,
+    details: { reviewerName: string; reason: string }
+  ) => {
+    const decidedAtDisplay = new Date().toLocaleString();
+    const decidedAtIso = new Date().toISOString();
+
+    const rejectedRecord: HistoryRecord = {
+      ...existingRecord,
+      'Submission ID': submissionId,
+      'HoD Approval': 'Rejected',
+      'Approval Status': 'Rejected',
+      'Permit Status': 'Rejected',
+      Status: 'Rejected',
+      'HoD Rejected By': details.reviewerName,
+      'HoD Approved By': '',
+      'HoD Rejection Reason': details.reason,
+      'Rejection Reason': details.reason,
+      'HoD Decision Remarks': details.reason,
+      'HoD Approval At': decidedAtDisplay,
+      'Last Updated': decidedAtIso,
+    };
+
+    saveLocalRecordOverride(targetType, submissionId, rejectedRecord);
+    setHistoryCache((prev) => ({
+      ...prev,
+      [targetType]: mergeRecordsWithOverrides(targetType, prev[targetType] || []),
+    }));
+    setViewerModalData((prev) =>
+      prev.submissionId === submissionId ? { ...prev, record: rejectedRecord } : prev
+    );
+
+    const wo = String(
+      targetType === 'height'
+        ? existingRecord['Work Order No.'] || existingRecord['workOrderNo'] || ''
+        : existingRecord['Work Order Number'] || existingRecord['workOrderNumber'] || ''
+    );
+    const loc = String(existingRecord['Location'] || existingRecord['Department/Location'] || 'Plant Grounds');
+    const verificationUrl = buildPermitVerificationUrl(targetType, submissionId, wo, { review: true });
+
+    const emailResult = await dispatchSilentEmailNotification({
+      event: 'permit_rejected',
+      formType: targetType,
+      submissionId,
+      workOrder: wo,
+      location: loc,
+      department: String(existingRecord['Department'] || ''),
+      equipmentId: String(existingRecord['Equipment ID'] || existingRecord['equipmentId'] || ''),
+      description: String(existingRecord['Description'] || existingRecord['Purpose'] || ''),
+      reviewerName: details.reviewerName,
+      rejectionReason: details.reason,
+      verificationUrl,
+    });
+
+    const res = await postToBackend({
+      formType: targetType,
+      action: 'hod_decision',
+      submissionId,
+      skipAppsScriptEmail: emailResult.deliveredByServer,
+      data: {
+        ...rejectedRecord,
+        'Verification URL': verificationUrl,
+      },
+    });
+
+    if (!res || !res.ok) {
+      await addToOutbox({
+        formType: targetType,
+        action: 'hod_decision',
+        submissionId,
+        data: rejectedRecord,
+      });
+      setSyncStatus((prev) => ({
+        ...prev,
+        pendingQueueCount: prev.pendingQueueCount + 1,
+      }));
+    } else {
+      await loadCloudHistory();
+    }
+
+    showToast(`Permit ${submissionId} rejected and logged with reason.`);
   };
 
   // Renewal Handler
@@ -754,10 +1222,19 @@ export default function App() {
                   showToast('✓ Local encrypted draft saved to browser storage.');
                 }}
                 onClearForm={() => {
-                  if (window.confirm('Clear all fields for this form?')) {
-                    handleFormChange(formType, DEFAULT_PERMIT_STATE[formType] as Partial<AllPermitState[typeof formType]>);
-                    showToast('Form reset to default.');
+                  const freshDefaults = createFreshPermitDefaults(formType);
+                  setPermitState((prev) => ({
+                    ...prev,
+                    [formType]: freshDefaults,
+                  }));
+                  setConflictAnalysisState((prev) => ({
+                    ...prev,
+                    [formType]: null,
+                  }));
+                  if (formType === 'hotwork') {
+                    setNotifyStatusMessage('');
                   }
+                  showToast(`✓ ${formType.toUpperCase()} form fields reset cleanly.`);
                 }}
               />
             </div>
@@ -844,6 +1321,7 @@ export default function App() {
                 submissionId: sId,
               });
             }}
+            onClosePermit={handleClosePermitFromExecutive}
           />
         ) : null}
       </main>
@@ -890,14 +1368,18 @@ export default function App() {
         onAccept={handleAcceptTerms}
       />
 
-      {/* Official Read-Only Permit Viewer Modal */}
+      {/* Official Permit Viewer & Review Modal */}
       <PermitViewerModal
         isOpen={viewerModalData.isOpen}
-        onClose={() => setViewerModalData((prev) => ({ ...prev, isOpen: false }))}
+        onClose={() => setViewerModalData((prev) => ({ ...prev, isOpen: false, canReview: false }))}
         formType={viewerModalData.formType}
         record={viewerModalData.record}
         submissionId={viewerModalData.submissionId}
         relatedPermits={viewerModalData.relatedPermits}
+        canReview={Boolean(viewerModalData.canReview || isAdminUnlocked)}
+        defaultReviewerName={currentExecutiveUser?.fullName || ''}
+        onApprovePermit={handleApprovePermitDecision}
+        onRejectPermit={handleRejectPermitDecision}
       />
 
       {/* 24-Hour Renewal Modal */}

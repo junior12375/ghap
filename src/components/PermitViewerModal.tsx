@@ -1,7 +1,15 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { HistoryRecord, PermitType } from '../types/permit';
-import { getWorkOrderNumber } from '../utils/permitHelpers';
-import { Printer, X, ShieldCheck, CheckCircle2, Clock, UserCheck, AlertTriangle } from 'lucide-react';
+import { getWorkOrderNumber, isPermitClosed, isPermitRejected } from '../utils/permitHelpers';
+import {
+  Printer,
+  X,
+  CheckCircle2,
+  XCircle,
+  AlertOctagon,
+  ShieldCheck,
+  Loader2,
+} from 'lucide-react';
 import { GhacemLogo, HeidelbergMaterialsLogo } from './Logos';
 
 interface PermitViewerModalProps {
@@ -11,6 +19,20 @@ interface PermitViewerModalProps {
   record: HistoryRecord | null;
   submissionId: string;
   relatedPermits?: Array<{ formType: PermitType; record: HistoryRecord; id: string }>;
+  canReview?: boolean;
+  defaultReviewerName?: string;
+  onApprovePermit?: (
+    formType: PermitType,
+    submissionId: string,
+    record: HistoryRecord,
+    details: { reviewerName: string; remarks: string }
+  ) => Promise<void>;
+  onRejectPermit?: (
+    formType: PermitType,
+    submissionId: string,
+    record: HistoryRecord,
+    details: { reviewerName: string; reason: string }
+  ) => Promise<void>;
 }
 
 export const PermitViewerModal: React.FC<PermitViewerModalProps> = ({
@@ -20,8 +42,29 @@ export const PermitViewerModal: React.FC<PermitViewerModalProps> = ({
   record: initialRecord,
   submissionId: initialSubId,
   relatedPermits = [],
+  canReview = false,
+  defaultReviewerName = '',
+  onApprovePermit,
+  onRejectPermit,
 }) => {
   const [selectedIdx, setSelectedIdx] = useState(0);
+  const [reviewerName, setReviewerName] = useState(defaultReviewerName);
+  const [decisionNotes, setDecisionNotes] = useState('');
+  const [decisionError, setDecisionError] = useState('');
+  const [decisionFeedback, setDecisionFeedback] = useState<{ type: 'approved' | 'rejected'; text: string } | null>(null);
+  const [isProcessingDecision, setIsProcessingDecision] = useState<'approve' | 'reject' | null>(null);
+  const notesTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setSelectedIdx(0);
+      setReviewerName(defaultReviewerName);
+      setDecisionNotes('');
+      setDecisionError('');
+      setDecisionFeedback(null);
+      setIsProcessingDecision(null);
+    }
+  }, [isOpen, initialSubId, defaultReviewerName]);
 
   if (!isOpen || !initialRecord) return null;
 
@@ -35,11 +78,82 @@ export const PermitViewerModal: React.FC<PermitViewerModalProps> = ({
   const wo = getWorkOrderNumber(formType, record);
   const location = String(record['Location'] || record['Department/Location'] || 'Unspecified Location');
   const description = String(record['Description'] || record['Purpose'] || 'N/A');
-  const status = String(record['Status'] || record['Permit Status'] || 'Approved');
+  const isRejected = isPermitRejected(record);
+  const isClosed = isPermitClosed(formType, record);
+  const hodApproval = String(record['HoD Approval'] || record['Approval Status'] || '');
+  const isHodApproved = !isRejected && hodApproval.toLowerCase() === 'approved';
+  const rejectionReason = String(record['HoD Rejection Reason'] || record['Rejection Reason'] || '');
+  const decisionAt = String(record['HoD Approval At'] || record['Last Updated'] || '');
+  const decidedBy = String(
+    record['HoD Approved By'] || record['HoD Rejected By'] || ''
+  );
+  const decisionRemarks = String(record['HoD Decision Remarks'] || '');
   const isRenewal = String(record['Renewal Status'] || '') === 'Approved' || id.includes('-R');
+
+  const statusLabel = isRejected
+    ? 'REJECTED'
+    : isClosed
+    ? 'CLOSED'
+    : isHodApproved
+    ? 'HOD APPROVED'
+    : String(record['Status'] || record['Permit Status'] || 'PENDING REVIEW').toUpperCase();
+
+  const statusBadgeClass = isRejected
+    ? 'bg-red-500/15 text-red-500 border-red-500/40'
+    : isClosed
+    ? 'bg-slate-500/15 text-slate-400 border-slate-500/40'
+    : isHodApproved
+    ? 'bg-[var(--color-good-subtle)] text-[var(--color-good)] border-[var(--color-good)]/30'
+    : 'bg-amber-500/15 text-amber-500 border-amber-500/40';
 
   const handlePrint = () => {
     window.print();
+  };
+
+  const handleApproveClick = async () => {
+    if (!onApprovePermit || isProcessingDecision) return;
+    setDecisionError('');
+    setIsProcessingDecision('approve');
+    try {
+      await onApprovePermit(formType, id, record, {
+        reviewerName: reviewerName.trim() || 'Head of Department (HoD)',
+        remarks: decisionNotes.trim(),
+      });
+      setDecisionFeedback({
+        type: 'approved',
+        text: `Permit ${id} approved and updated across the safety register.`,
+      });
+    } catch (err) {
+      setDecisionError(err instanceof Error ? err.message : 'Failed to approve permit.');
+    } finally {
+      setIsProcessingDecision(null);
+    }
+  };
+
+  const handleRejectClick = async () => {
+    if (!onRejectPermit || isProcessingDecision) return;
+    const trimmedReason = decisionNotes.trim();
+    if (!trimmedReason) {
+      setDecisionError('A specific rejection reason is required before rejecting this permit.');
+      notesTextareaRef.current?.focus();
+      return;
+    }
+    setDecisionError('');
+    setIsProcessingDecision('reject');
+    try {
+      await onRejectPermit(formType, id, record, {
+        reviewerName: reviewerName.trim() || 'Head of Department (HoD)',
+        reason: trimmedReason,
+      });
+      setDecisionFeedback({
+        type: 'rejected',
+        text: `Permit ${id} formally rejected and moved to the Rejected Permits Register.`,
+      });
+    } catch (err) {
+      setDecisionError(err instanceof Error ? err.message : 'Failed to reject permit.');
+    } finally {
+      setIsProcessingDecision(null);
+    }
   };
 
   return (
@@ -48,12 +162,12 @@ export const PermitViewerModal: React.FC<PermitViewerModalProps> = ({
         {/* Header */}
         <div className="flex items-center justify-between p-4 sm:p-5 border-b border-[var(--color-border)] no-print">
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-xs font-semibold text-[var(--color-accent)]">
                 OFFICIAL CORPORATE PERMIT RECORD
               </span>
-              <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-[var(--color-good-subtle)] text-[var(--color-good)] border border-[var(--color-good)]/30 font-bold">
-                {status.toUpperCase()}
+              <span className={`font-mono text-[10px] px-2 py-0.5 rounded border font-bold ${statusBadgeClass}`}>
+                {statusLabel}
               </span>
               {isRenewal && (
                 <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-[var(--color-accent-subtle)] text-[var(--color-accent)] border border-[var(--color-accent-border)] font-bold">
@@ -104,7 +218,148 @@ export const PermitViewerModal: React.FC<PermitViewerModalProps> = ({
         )}
 
         {/* Printable Official Form Body */}
-        <div className="p-6 overflow-y-auto space-y-6 text-xs flex-1">
+        <div className="p-4 sm:p-6 overflow-y-auto space-y-5 text-xs flex-1">
+          {/* Interactive Approval / Rejection Panel when opened for decision */}
+          {canReview && !isClosed && onApprovePermit && onRejectPermit && (
+            <div className="rounded-xl border-2 border-[var(--color-accent-border)] bg-[var(--color-surface-elevated)] p-4 space-y-3 no-print">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="h-4 w-4 text-[var(--color-accent)]" />
+                  <span className="font-display font-bold text-sm text-[var(--color-text-main)]">
+                    HoD / EHS Authorization Decision
+                  </span>
+                </div>
+                <span className="font-mono text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+                  Approve or Reject with Reason
+                </span>
+              </div>
+
+              {decisionFeedback && (
+                <div
+                  className={`rounded-lg border px-3 py-2 text-xs font-medium flex items-center gap-2 ${
+                    decisionFeedback.type === 'approved'
+                      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500'
+                      : 'border-red-500/40 bg-red-500/10 text-red-500'
+                  }`}
+                >
+                  {decisionFeedback.type === 'approved' ? (
+                    <CheckCircle2 className="h-4 w-4 shrink-0" />
+                  ) : (
+                    <XCircle className="h-4 w-4 shrink-0" />
+                  )}
+                  <span>{decisionFeedback.text}</span>
+                </div>
+              )}
+
+              {decisionError && (
+                <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-500 flex items-center gap-2">
+                  <AlertOctagon className="h-4 w-4 shrink-0" />
+                  <span>{decisionError}</span>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[10px] font-mono uppercase text-[var(--color-text-muted)] mb-1">
+                    Authorizing Officer / HoD Name
+                  </label>
+                  <input
+                    type="text"
+                    value={reviewerName}
+                    onChange={(e) => setReviewerName(e.target.value)}
+                    placeholder="e.g. Osei Emmanuel (HoD)"
+                    className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-xs text-[var(--color-text-main)] placeholder:text-[var(--color-text-faint)] focus:border-[var(--color-accent)] focus:outline-none"
+                  />
+                </div>
+                <div className="flex items-end">
+                  <p className="text-[11px] text-[var(--color-text-muted)] leading-snug">
+                    Inspect the work scope, hazards, gas tests, and signatures below before issuing final approval or logging a rejection reason.
+                  </p>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-mono uppercase text-[var(--color-text-muted)] mb-1">
+                  Approval Remarks or Mandatory Rejection Reason
+                </label>
+                <textarea
+                  ref={notesTextareaRef}
+                  rows={2}
+                  value={decisionNotes}
+                  onChange={(e) => {
+                    setDecisionNotes(e.target.value);
+                    if (decisionError) setDecisionError('');
+                  }}
+                  placeholder="Optional conditions/remarks when approving, or state the exact safety/operational reason when rejecting..."
+                  className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-xs text-[var(--color-text-main)] placeholder:text-[var(--color-text-faint)] focus:border-[var(--color-accent)] focus:outline-none"
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center justify-end gap-2.5 pt-1">
+                <button
+                  type="button"
+                  disabled={isProcessingDecision !== null}
+                  onClick={handleRejectClick}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-60 text-white font-display font-bold text-xs transition-colors cursor-pointer"
+                >
+                  {isProcessingDecision === 'reject' ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <XCircle className="h-3.5 w-3.5" />
+                  )}
+                  <span>Reject Permit with Reason</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isProcessingDecision !== null}
+                  onClick={handleApproveClick}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-display font-bold text-xs transition-colors cursor-pointer"
+                >
+                  {isProcessingDecision === 'approve' ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                  )}
+                  <span>Approve Permit</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Recorded Decision Status Callout (Visible on Print & Read-Only View) */}
+          {isRejected && (
+            <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-4 space-y-1.5">
+              <div className="flex items-center gap-2 text-red-500 font-display font-bold text-xs">
+                <AlertOctagon className="h-4 w-4 shrink-0" />
+                <span>PERMIT FORMALLY REJECTED</span>
+              </div>
+              <p className="text-xs text-[var(--color-text-main)] font-medium">
+                Reason: {rejectionReason || 'No specific rejection reason recorded.'}
+              </p>
+              <div className="text-[11px] font-mono text-[var(--color-text-muted)]">
+                {decidedBy ? `Reviewed By: ${decidedBy} · ` : ''}
+                {decisionAt ? `Timestamp: ${decisionAt}` : ''}
+              </div>
+            </div>
+          )}
+
+          {isHodApproved && (
+            <div className="rounded-xl border border-emerald-500/35 bg-emerald-500/10 p-4 space-y-1">
+              <div className="flex items-center gap-2 text-emerald-500 font-display font-bold text-xs">
+                <CheckCircle2 className="h-4 w-4 shrink-0" />
+                <span>HOD AUTHORIZATION APPROVED</span>
+              </div>
+              {decisionRemarks && (
+                <p className="text-xs text-[var(--color-text-main)]">Remarks: {decisionRemarks}</p>
+              )}
+              <div className="text-[11px] font-mono text-[var(--color-text-muted)]">
+                {decidedBy ? `Approved By: ${decidedBy} · ` : ''}
+                {decisionAt ? `Timestamp: ${decisionAt}` : ''}
+              </div>
+            </div>
+          )}
+
           {/* Top Brand Banner */}
           <div className="border border-[var(--color-border)] rounded-xl p-4 bg-[var(--color-surface-elevated)] flex flex-wrap items-center justify-between gap-4">
             <div className="flex items-center gap-3.5">

@@ -57,6 +57,12 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({
   onSaveDraft,
   onClearForm,
 }) => {
+  const [confirmingReset, setConfirmingReset] = React.useState(false);
+
+  React.useEffect(() => {
+    setConfirmingReset(false);
+  }, [formType]);
+
   // Steps definition based on permit requirements
   const steps = [
     {
@@ -314,6 +320,7 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({
         </div>
 
         <button
+          type="button"
           onClick={onSubmit}
           disabled={isSubmitting}
           className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-display font-bold text-xs transition-colors shadow-md disabled:opacity-60 disabled:cursor-not-allowed ${
@@ -341,6 +348,7 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({
         </button>
 
         <button
+          type="button"
           onClick={onSaveDraft}
           className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-elevated)] hover:bg-[var(--color-surface-hover)] text-[var(--color-text-main)] text-xs font-medium transition-colors"
         >
@@ -348,13 +356,41 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({
           Save Local Draft
         </button>
 
-        <button
-          onClick={onClearForm}
-          className="w-full flex items-center justify-center gap-2 px-4 py-1.5 rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-danger)] text-xs transition-colors"
-        >
-          <RotateCcw className="h-3 w-3" />
-          Reset Form Fields
-        </button>
+        {!confirmingReset ? (
+          <button
+            type="button"
+            onClick={() => setConfirmingReset(true)}
+            className="w-full flex items-center justify-center gap-2 px-4 py-1.5 rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-danger)] hover:bg-red-500/5 text-xs transition-colors cursor-pointer"
+          >
+            <RotateCcw className="h-3 w-3" />
+            Reset Form Fields
+          </button>
+        ) : (
+          <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-2.5 space-y-2">
+            <p className="text-[11px] font-medium text-red-500 text-center">
+              Clear all fields on this form?
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmingReset(false)}
+                className="px-2.5 py-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-main)] text-xs font-medium hover:bg-[var(--color-surface-hover)] cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirmingReset(false);
+                  onClearForm();
+                }}
+                className="px-2.5 py-1.5 rounded-md bg-red-600 hover:bg-red-700 text-white text-xs font-bold cursor-pointer"
+              >
+                Yes, Reset
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Corporate Compliance Note */}

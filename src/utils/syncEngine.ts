@@ -53,8 +53,14 @@ export function saveSyncUrl(url: string): void {
 export function getPublicPortalUrl(): string {
   try {
     const saved = localStorage.getItem(PUBLIC_PORTAL_URL_KEY);
-    if (saved) return saved;
-    if (typeof window !== 'undefined' && window.location.origin && window.location.origin.startsWith('http')) {
+    if (saved && !saved.includes('ais-dev-')) return saved;
+    if (
+      typeof window !== 'undefined' &&
+      window.location.origin &&
+      window.location.origin.startsWith('http') &&
+      !window.location.origin.includes('ais-dev-') &&
+      !window.location.origin.includes('localhost')
+    ) {
       return window.location.origin + window.location.pathname;
     }
     return DEFAULT_PUBLIC_PORTAL_URL;
@@ -74,7 +80,7 @@ export function savePublicPortalUrl(url: string): void {
 export interface OutboxItem {
   id: string;
   formType: PermitType;
-  action: 'submit' | 'update' | 'close' | 'department_authorize' | 'request_ehs_test' | 'ehs_update_test';
+  action: 'submit' | 'update' | 'close' | 'department_authorize' | 'request_ehs_test' | 'ehs_update_test' | 'hod_decision';
   submissionId: string;
   data: Record<string, unknown>;
   createdAt: number;
@@ -236,8 +242,35 @@ export async function flushOutboxQueue(onProgress?: (info: SyncStatusInfo) => vo
   return { processed, errors };
 }
 
-/** Generate public QR verification URL */
-export function buildPermitVerificationUrl(formType: PermitType, submissionId: string, workOrder?: string): string {
+/** Generate public QR / email review or EHS gas test verification URL */
+export function buildPermitVerificationUrl(
+  formType: PermitType,
+  submissionId: string,
+  workOrder?: string,
+  options?: { review?: boolean; ehsGasTest?: boolean }
+): string {
+  const isEhsGasTest = Boolean(options?.ehsGasTest);
+  const isReview = Boolean(options?.review);
+
+  // Email action links always target the publicly accessible Google Apps Script Web App
+  // so recipients never hit AI Studio dev auth errors or unpublished 404 pages.
+  if (isEhsGasTest || isReview) {
+    const syncBase = getSyncUrl() || DEFAULT_SYNC_URL;
+    const targetMode = isEhsGasTest ? 'ehs_test' : 'review';
+    try {
+      const url = new URL(syncBase);
+      url.searchParams.set('mode', targetMode);
+      url.searchParams.set('permit', formType);
+      url.searchParams.set('id', submissionId);
+      if (workOrder) url.searchParams.set('workorder', workOrder);
+      return url.toString();
+    } catch {
+      return `${syncBase}?mode=${targetMode}&permit=${encodeURIComponent(formType)}&id=${encodeURIComponent(submissionId)}${
+        workOrder ? `&workorder=${encodeURIComponent(workOrder)}` : ''
+      }`;
+    }
+  }
+
   const base = getPublicPortalUrl();
   try {
     const url = new URL(base);
@@ -246,6 +279,53 @@ export function buildPermitVerificationUrl(formType: PermitType, submissionId: s
     if (workOrder) url.searchParams.set('workorder', workOrder);
     return url.toString();
   } catch {
-    return `${base}?permit=${encodeURIComponent(formType)}&id=${encodeURIComponent(submissionId)}${workOrder ? `&workorder=${encodeURIComponent(workOrder)}` : ''}`;
+    return `${base}?permit=${encodeURIComponent(formType)}&id=${encodeURIComponent(submissionId)}${
+      workOrder ? `&workorder=${encodeURIComponent(workOrder)}` : ''
+    }`;
+  }
+}
+
+export interface SilentEmailPayload {
+  event: 'permit_submitted' | 'ehs_confined_alert' | 'permit_closed' | 'permit_approved' | 'permit_rejected';
+  formType: PermitType;
+  submissionId: string;
+  workOrder?: string;
+  location?: string;
+  department?: string;
+  equipmentId?: string;
+  description?: string;
+  supervisorName?: string;
+  supervisorWorkId?: string;
+  closedBy?: string;
+  closureRemarks?: string;
+  reviewerName?: string;
+  decisionRemarks?: string;
+  rejectionReason?: string;
+  verificationUrl?: string;
+}
+
+/**
+ * Dispatches an automatic server-side email alert without displaying
+ * any email address or confirmation modal to the user.
+ */
+export async function dispatchSilentEmailNotification(
+  payload: SilentEmailPayload
+): Promise<{ ok: boolean; deliveredByServer: boolean }> {
+  try {
+    const res = await fetch('/api/notifications/email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      return { ok: false, deliveredByServer: false };
+    }
+    const json = (await res.json()) as { ok?: boolean; deliveredByServer?: boolean };
+    return {
+      ok: Boolean(json.ok),
+      deliveredByServer: Boolean(json.deliveredByServer),
+    };
+  } catch {
+    return { ok: false, deliveredByServer: false };
   }
 }

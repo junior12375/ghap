@@ -268,7 +268,7 @@ export const HotWorkPermitForm: React.FC<HotWorkPermitFormProps> = ({
             </div>
 
             {notifyStatusMessage && (
-              <div className="text-xs font-mono p-2.5 rounded bg-black/30 border border-amber-500/30 text-amber-200">
+              <div className="text-xs font-mono p-2.5 rounded-lg bg-[var(--color-surface)] border border-red-500/40 text-[var(--color-text-main)] shadow-xs">
                 {notifyStatusMessage}
               </div>
             )}

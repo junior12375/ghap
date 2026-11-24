@@ -40,6 +40,12 @@ interface AdminOperationsViewProps {
   onLock: () => void;
   onRefresh: () => void;
   onOpenViewer: (formType: PermitType, record: HistoryRecord, submissionId: string) => void;
+  onClosePermit: (
+    formType: PermitType,
+    submissionId: string,
+    record: HistoryRecord,
+    details: { closedBy: string; remarks: string }
+  ) => Promise<void>;
   currentExecutiveUser: ExecutiveUser | null;
 }
 
@@ -51,6 +57,7 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
   onLock,
   onRefresh,
   onOpenViewer,
+  onClosePermit,
   currentExecutiveUser,
 }) => {
   // Server Auth Configuration Status
@@ -97,6 +104,14 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
   const [statusFilter, setStatusFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [includeBaseline, setIncludeBaseline] = useState(true);
+
+  // Close Active Permit Modal State
+  const [closingTarget, setClosingTarget] = useState<UnifiedPermitRecord | null>(null);
+  const [closedByInput, setClosedByInput] = useState('');
+  const [closureRemarks, setClosureRemarks] = useState('');
+  const [closureConfirmed, setClosureConfirmed] = useState(false);
+  const [isClosingPermit, setIsClosingPermit] = useState(false);
+  const [closePermitError, setClosePermitError] = useState('');
 
   useEffect(() => {
     if (!isAdminUnlocked) {
@@ -279,6 +294,47 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
       setTimeout(() => setToastNotification(null), 5000);
     } else {
       setNewExecError(res.error || 'Failed to provision executive account.');
+    }
+  };
+
+  const openClosePermitModal = (item: UnifiedPermitRecord) => {
+    const defaultSigner = currentExecutiveUser
+      ? `${currentExecutiveUser.fullName} (${currentExecutiveUser.workId})`
+      : 'Executive Operations';
+    setClosingTarget(item);
+    setClosedByInput(defaultSigner);
+    setClosureRemarks('Work completed safely, personnel clear, and isolations handed back.');
+    setClosureConfirmed(false);
+    setClosePermitError('');
+  };
+
+  const handleConfirmClosePermit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!closingTarget) return;
+    if (!closedByInput.trim()) {
+      setClosePermitError('Please enter the name / Work ID of the closing officer.');
+      return;
+    }
+    if (!closureConfirmed) {
+      setClosePermitError('Please confirm that work is completed and isolations have been safely handed back.');
+      return;
+    }
+
+    setIsClosingPermit(true);
+    setClosePermitError('');
+    try {
+      await onClosePermit(closingTarget.formType, closingTarget.id, closingTarget.record, {
+        closedBy: closedByInput.trim(),
+        remarks: closureRemarks.trim() || 'Work completed and handed back via Executive Operations.',
+      });
+      const closedId = closingTarget.id;
+      setClosingTarget(null);
+      setToastNotification(`✓ Permit ${closedId} closed and moved to Closed & Handed Back.`);
+      setTimeout(() => setToastNotification(null), 5000);
+    } catch (err) {
+      setClosePermitError(err instanceof Error ? err.message : 'Failed to close permit.');
+    } finally {
+      setIsClosingPermit(false);
     }
   };
 
@@ -803,6 +859,25 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
       {/* VIEW 2: Complete Filterable Register Table */}
       {activeSubTab !== 'overview' && (
         <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden shadow-xs space-y-4 p-5">
+          {(activeSubTab === 'active' || activeSubTab === 'overdue') && (
+            <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2.5">
+                <CheckCircle className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                <div>
+                  <span className="font-display font-bold text-[var(--color-text-main)]">
+                    Permit Closure &amp; Work Handback Control
+                  </span>
+                  <p className="text-[11px] text-[var(--color-text-muted)]">
+                    After field work is finished and LOTO isolations are removed, click <span className="font-semibold text-[var(--color-text-main)]">Close Permit</span> on any active or overdue permit below to record sign-off and close it.
+                  </p>
+                </div>
+              </div>
+              <span className="font-mono text-[11px] font-bold px-2.5 py-1 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text-main)]">
+                {filteredRecords.length} Open
+              </span>
+            </div>
+          )}
+
           {/* Filter Bar */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2">
@@ -933,13 +1008,26 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
                       </td>
 
                       <td className="p-3.5 text-right">
-                        <button
-                          onClick={() => onOpenViewer(item.formType, item.record, item.id)}
-                          className="px-2.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-elevated)] hover:bg-[var(--color-surface-hover)] text-xs text-[var(--color-text-main)] transition-colors inline-flex items-center gap-1 font-semibold cursor-pointer"
-                        >
-                          <Eye className="h-3 w-3 text-[var(--color-accent)]" />
-                          <span>View</span>
-                        </button>
+                        <div className="inline-flex items-center justify-end gap-1.5">
+                          {(item.status === 'Active' || item.status === 'Overdue') && (
+                            <button
+                              type="button"
+                              onClick={() => openClosePermitModal(item)}
+                              className="px-2.5 py-1 rounded-lg border border-emerald-500/40 bg-emerald-600 hover:bg-emerald-700 text-white text-xs transition-colors inline-flex items-center gap-1 font-semibold cursor-pointer shadow-xs"
+                              title="Close this active permit after work is completed"
+                            >
+                              <CheckCircle className="h-3 w-3" />
+                              <span>Close Permit</span>
+                            </button>
+                          )}
+                          <button
+                            onClick={() => onOpenViewer(item.formType, item.record, item.id)}
+                            className="px-2.5 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-elevated)] hover:bg-[var(--color-surface-hover)] text-xs text-[var(--color-text-main)] transition-colors inline-flex items-center gap-1 font-semibold cursor-pointer"
+                          >
+                            <Eye className="h-3 w-3 text-[var(--color-accent)]" />
+                            <span>View</span>
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -1065,6 +1153,111 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
                   className="px-4 py-2 rounded-xl bg-[var(--color-accent)] text-neutral-950 font-bold disabled:opacity-50"
                 >
                   {isCreatingExec ? 'Saving...' : 'Create Account'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Close Active Permit & Handback Modal */}
+      {closingTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/65 backdrop-blur-xs animate-fade-in">
+          <div className="w-full max-w-lg rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between border-b border-[var(--color-border)] px-5 py-4 bg-[var(--color-surface-elevated)]">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">
+                  <CheckCircle className="h-4 w-4" />
+                </div>
+                <div>
+                  <h3 className="font-display font-bold text-sm text-[var(--color-text-main)]">
+                    Close Active Permit &amp; Handback Work
+                  </h3>
+                  <p className="text-[11px] font-mono text-[var(--color-text-muted)]">
+                    {closingTarget.formType.toUpperCase()} · {closingTarget.id} · WO #{closingTarget.workOrder || 'N/A'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setClosingTarget(null)}
+                className="text-xs font-mono text-[var(--color-text-muted)] hover:text-[var(--color-text-main)]"
+              >
+                Cancel
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmClosePermit} className="p-5 space-y-4 text-xs">
+              <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] p-3.5 space-y-1">
+                <div className="font-semibold text-[var(--color-text-main)]">{closingTarget.location}</div>
+                <div className="text-[11px] text-[var(--color-text-muted)]">
+                  {String(closingTarget.record['Description'] || closingTarget.record['Purpose'] || 'Active plant work')}
+                </div>
+                <div className="text-[11px] font-mono text-[var(--color-text-faint)] pt-1">
+                  Crew / Contractor: {closingTarget.contractor || 'Ghacem Internal'} · Facility: {closingTarget.facility}
+                </div>
+              </div>
+
+              {closePermitError && (
+                <div className="rounded-xl border border-red-500/40 bg-red-600/10 p-3 text-xs text-red-600 dark:text-red-400 flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>{closePermitError}</span>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-[11px] font-semibold text-[var(--color-text-main)] mb-1">
+                  Closing Officer Name &amp; Work ID <span className="text-[var(--color-danger)]">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={closedByInput}
+                  onChange={(e) => setClosedByInput(e.target.value)}
+                  className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 text-xs text-[var(--color-text-main)] font-mono focus:border-[var(--color-accent)] focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-[var(--color-text-main)] mb-1">
+                  Completion &amp; Handback Remarks
+                </label>
+                <textarea
+                  rows={3}
+                  value={closureRemarks}
+                  onChange={(e) => setClosureRemarks(e.target.value)}
+                  placeholder="Describe work completion, LOTO lock removal, housekeeping..."
+                  className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 text-xs text-[var(--color-text-main)] focus:border-[var(--color-accent)] focus:outline-none"
+                />
+              </div>
+
+              <label className="flex items-start gap-2.5 p-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={closureConfirmed}
+                  onChange={(e) => setClosureConfirmed(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 accent-[var(--color-accent)] rounded"
+                />
+                <span className="text-[11px] text-[var(--color-text-main)] leading-relaxed">
+                  I confirm that work is completed, all tools and personnel are clear of the area, and all mechanical/electrical LOTO isolations have been safely handed back.
+                </span>
+              </label>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-[var(--color-border)]">
+                <button
+                  type="button"
+                  onClick={() => setClosingTarget(null)}
+                  disabled={isClosingPermit}
+                  className="px-4 py-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] text-[var(--color-text-main)] font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isClosingPermit}
+                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-display font-bold flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                >
+                  <CheckCircle className="h-3.5 w-3.5" />
+                  <span>{isClosingPermit ? 'Closing Permit...' : 'Confirm & Close Permit'}</span>
                 </button>
               </div>
             </form>
