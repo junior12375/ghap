@@ -74,7 +74,12 @@ export interface ServerExecutiveAccount {
 
 export type PublicExecutiveUser = Omit<ServerExecutiveAccount, 'passwordSalt' | 'passwordHash'>;
 
-const ACCOUNTS_STORE_PATH = path.resolve('.executive-accounts.json');
+const DEFAULT_APPS_SCRIPT_URL =
+  'https://script.google.com/macros/s/AKfycbz8L1Izxu4dXNaQ9uIgwIGLtxT9o3N8w3kNA7cba2r27YD3YSfEIahLCs4fkQ5W_Igv/exec';
+
+const ACCOUNTS_STORE_PATH = process.env.VERCEL
+  ? path.join('/tmp', 'executive-accounts.json')
+  : path.resolve('.executive-accounts.json');
 
 function loadPersistedExecutiveAccounts(): ServerExecutiveAccount[] {
   try {
@@ -97,6 +102,32 @@ function savePersistedExecutiveAccounts(accounts: ServerExecutiveAccount[]): voi
 }
 
 const executiveAccounts: ServerExecutiveAccount[] = loadPersistedExecutiveAccounts();
+
+async function callAppsScriptExec(
+  action: string,
+  payload: Record<string, unknown> = {}
+): Promise<Record<string, unknown> | null> {
+  const syncUrl = (process.env.APPS_SCRIPT_SYNC_URL || DEFAULT_APPS_SCRIPT_URL).trim();
+  if (!syncUrl) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
+  try {
+    const resp = await fetch(syncUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action, ...payload }),
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+    const text = await resp.text();
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function hashPassword(password: string, saltHex?: string): { saltHex: string; hashHex: string } {
   const salt = saltHex || crypto.randomBytes(16).toString('hex');
@@ -132,6 +163,7 @@ function signSessionToken(user: PublicExecutiveUser): string {
     username: user.username,
     workId: user.workId,
     clearanceLevel: user.clearanceLevel,
+    user,
     exp: Date.now() + SESSION_TTL_MS,
   };
   const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
@@ -139,7 +171,9 @@ function signSessionToken(user: PublicExecutiveUser): string {
   return `${encoded}.${sig}`;
 }
 
-function verifySessionToken(token: string): { sub: string; username: string; exp: number } | null {
+function verifySessionToken(
+  token: string
+): { sub: string; username: string; user?: PublicExecutiveUser; exp: number } | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 2) return null;
@@ -149,6 +183,7 @@ function verifySessionToken(token: string): { sub: string; username: string; exp
     const decoded = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as {
       sub: string;
       username: string;
+      user?: PublicExecutiveUser;
       exp: number;
     };
     if (!decoded || typeof decoded.exp !== 'number' || Date.now() > decoded.exp) {
@@ -197,7 +232,7 @@ function requireExecutiveAuth(req: AuthenticatedRequest, res: Response, next: Ne
   if (!verified) {
     return res.status(401).json({ ok: false, error: 'Session expired or invalid. Please sign in again.' });
   }
-  const user = findUserById(verified.sub);
+  const user = findUserById(verified.sub) || verified.user || null;
   if (!user) {
     return res.status(401).json({ ok: false, error: 'Executive account no longer active.' });
   }
@@ -206,21 +241,35 @@ function requireExecutiveAuth(req: AuthenticatedRequest, res: Response, next: Ne
 }
 
 // GET /api/executive/status - Check whether executive auth is configured
-app.get('/api/executive/status', (_req: Request, res: Response) => {
+app.get('/api/executive/status', async (_req: Request, res: Response) => {
   const envAdmin = getEnvAdminUser();
-  const hasAccounts = executiveAccounts.length > 0;
+  const hasLocalAccounts = executiveAccounts.length > 0;
+  let remoteConfigured = false;
+  let remoteCount = 0;
+
+  if (!hasLocalAccounts) {
+    const remote = await callAppsScriptExec('exec_status');
+    if (remote && remote.ok) {
+      remoteConfigured = Boolean(remote.configured);
+      remoteCount = Number(remote.accountCount || 0);
+    }
+  }
+
   return res.json({
     ok: true,
-    configured: Boolean(envAdmin || hasAccounts),
+    configured: Boolean(envAdmin || hasLocalAccounts || remoteConfigured),
     envOverride: Boolean(envAdmin),
-    accountCount: executiveAccounts.length + (envAdmin ? 1 : 0),
+    accountCount: Math.max(executiveAccounts.length, remoteCount) + (envAdmin ? 1 : 0),
   });
 });
 
 // POST /api/executive/setup - One-time first-run executive account creation (locks once claimed or if env password set)
-app.post('/api/executive/setup', (req: Request, res: Response) => {
+app.post('/api/executive/setup', async (req: Request, res: Response) => {
   const envAdmin = getEnvAdminUser();
-  if (envAdmin || executiveAccounts.length > 0) {
+  const remoteStatus = executiveAccounts.length === 0 ? await callAppsScriptExec('exec_status') : null;
+  const remoteConfigured = Boolean(remoteStatus && remoteStatus.ok && remoteStatus.configured);
+
+  if (envAdmin || executiveAccounts.length > 0 || remoteConfigured) {
     return res.status(409).json({
       ok: false,
       error: 'Executive access is already configured. Please sign in with your credentials.',
@@ -268,6 +317,18 @@ app.post('/api/executive/setup', (req: Request, res: Response) => {
   executiveAccounts.push(newAccount);
   savePersistedExecutiveAccounts(executiveAccounts);
   const publicUser = sanitizeUser(newAccount);
+
+  // Also persist to Google Apps Script cloud store if deployed Code.gs supports exec_setup
+  await callAppsScriptExec('exec_setup', {
+    username,
+    password,
+    fullName,
+    role,
+    department,
+    facility,
+    workId,
+  });
+
   const token = signSessionToken(publicUser);
 
   return res.status(201).json({
@@ -278,7 +339,7 @@ app.post('/api/executive/setup', (req: Request, res: Response) => {
 });
 
 // POST /api/executive/login - Verify username/Work ID + password on server
-app.post('/api/executive/login', (req: Request, res: Response) => {
+app.post('/api/executive/login', async (req: Request, res: Response) => {
   const body = (req.body || {}) as Record<string, unknown>;
   const usernameInput = typeof body.username === 'string' ? body.username.trim().toLowerCase() : '';
   const passwordInput = typeof body.password === 'string' ? body.password : '';
@@ -303,13 +364,24 @@ app.post('/api/executive/login', (req: Request, res: Response) => {
     (acc) => acc.username.toLowerCase() === usernameInput || acc.workId.toLowerCase() === usernameInput
   );
 
-  if (!match || !verifyPasswordHash(passwordInput, match.passwordSalt, match.passwordHash)) {
-    return res.status(401).json({ ok: false, error: 'Invalid executive username or password.' });
+  if (match && verifyPasswordHash(passwordInput, match.passwordSalt, match.passwordHash)) {
+    const publicUser = sanitizeUser(match);
+    const token = signSessionToken(publicUser);
+    return res.json({ ok: true, token, user: publicUser });
   }
 
-  const publicUser = sanitizeUser(match);
-  const token = signSessionToken(publicUser);
-  return res.json({ ok: true, token, user: publicUser });
+  // Fallback check against Google Apps Script persistent store (handles Vercel/Cloud Run cold starts)
+  const remoteLogin = await callAppsScriptExec('exec_login', {
+    username: usernameInput,
+    password: passwordInput,
+  });
+  if (remoteLogin && remoteLogin.ok && remoteLogin.user) {
+    const remoteUser = remoteLogin.user as PublicExecutiveUser;
+    const token = signSessionToken(remoteUser);
+    return res.json({ ok: true, token, user: remoteUser });
+  }
+
+  return res.status(401).json({ ok: false, error: 'Invalid executive username or password.' });
 });
 
 // GET /api/executive/me - Get current authenticated executive session
@@ -318,7 +390,7 @@ app.get('/api/executive/me', requireExecutiveAuth, (req: AuthenticatedRequest, r
 });
 
 // POST /api/executive/change-password - Update password for authenticated user
-app.post('/api/executive/change-password', requireExecutiveAuth, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/executive/change-password', requireExecutiveAuth, async (req: AuthenticatedRequest, res: Response) => {
   const user = req.executiveUser!;
   if (user.envManaged) {
     return res.status(400).json({
@@ -342,30 +414,53 @@ app.post('/api/executive/change-password', requireExecutiveAuth, (req: Authentic
   }
 
   const account = executiveAccounts.find((a) => a.id === user.id);
-  if (!account || !verifyPasswordHash(currentPassword, account.passwordSalt, account.passwordHash)) {
-    return res.status(401).json({ ok: false, error: 'Current password does not match our records.' });
+  if (account) {
+    if (!verifyPasswordHash(currentPassword, account.passwordSalt, account.passwordHash)) {
+      return res.status(401).json({ ok: false, error: 'Current password does not match our records.' });
+    }
+    const { saltHex, hashHex } = hashPassword(newPassword);
+    account.passwordSalt = saltHex;
+    account.passwordHash = hashHex;
+    savePersistedExecutiveAccounts(executiveAccounts);
   }
 
-  const { saltHex, hashHex } = hashPassword(newPassword);
-  account.passwordSalt = saltHex;
-  account.passwordHash = hashHex;
-  savePersistedExecutiveAccounts(executiveAccounts);
+  const remoteChanged = await callAppsScriptExec('exec_change_password', {
+    username: user.username,
+    currentPassword,
+    newPassword,
+  });
+
+  if (!account && (!remoteChanged || !remoteChanged.ok)) {
+    return res.status(401).json({
+      ok: false,
+      error: String(remoteChanged?.error || 'Current password does not match our records.'),
+    });
+  }
 
   return res.json({ ok: true, message: 'Password updated successfully.' });
 });
 
 // GET /api/executive/accounts - List sanitized executive accounts (authenticated)
-app.get('/api/executive/accounts', requireExecutiveAuth, (_req: AuthenticatedRequest, res: Response) => {
+app.get('/api/executive/accounts', requireExecutiveAuth, async (_req: AuthenticatedRequest, res: Response) => {
   const envAdmin = getEnvAdminUser();
-  const list: PublicExecutiveUser[] = [
-    ...(envAdmin ? [envAdmin] : []),
-    ...executiveAccounts.map(sanitizeUser),
-  ];
-  return res.json({ ok: true, accounts: list });
+  const remoteAccountsResp = await callAppsScriptExec('exec_accounts');
+  const remoteAccounts =
+    remoteAccountsResp && remoteAccountsResp.ok && Array.isArray(remoteAccountsResp.accounts)
+      ? (remoteAccountsResp.accounts as PublicExecutiveUser[])
+      : [];
+  const mergedMap = new Map<string, PublicExecutiveUser>();
+  if (envAdmin) mergedMap.set(envAdmin.username.toLowerCase(), envAdmin);
+  executiveAccounts.map(sanitizeUser).forEach((u) => mergedMap.set(u.username.toLowerCase(), u));
+  remoteAccounts.forEach((u) => {
+    if (u && u.username && !mergedMap.has(u.username.toLowerCase())) {
+      mergedMap.set(u.username.toLowerCase(), u);
+    }
+  });
+  return res.json({ ok: true, accounts: Array.from(mergedMap.values()) });
 });
 
 // POST /api/executive/accounts - Provision a new executive account (Level 3 only)
-app.post('/api/executive/accounts', requireExecutiveAuth, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/executive/accounts', requireExecutiveAuth, async (req: AuthenticatedRequest, res: Response) => {
   if (req.executiveUser?.clearanceLevel !== 'Level 3 - Director & Executive') {
     return res.status(403).json({ ok: false, error: 'Level 3 Director clearance required to add executive accounts.' });
   }
@@ -401,6 +496,20 @@ app.post('/api/executive/accounts', requireExecutiveAuth, (req: AuthenticatedReq
     executiveAccounts.some((a) => a.username.toLowerCase() === username || a.workId.toLowerCase() === workId.toLowerCase())
   ) {
     return res.status(409).json({ ok: false, error: 'An executive account with that username or Work ID already exists.' });
+  }
+
+  const remoteCreate = await callAppsScriptExec('exec_create', {
+    username,
+    password,
+    fullName,
+    role,
+    department,
+    facility,
+    workId,
+    clearanceLevel,
+  });
+  if (remoteCreate && remoteCreate.ok === false && remoteCreate.conflict) {
+    return res.status(409).json({ ok: false, error: String(remoteCreate.error || 'Account already exists.') });
   }
 
   const { saltHex, hashHex } = hashPassword(password);
@@ -838,8 +947,7 @@ function escapeHtml(input: string): string {
     .replace(/'/g, '&#39;');
 }
 
-const DEFAULT_APPS_SCRIPT_URL =
-  'https://script.google.com/macros/s/AKfycbz8L1Izxu4dXNaQ9uIgwIGLtxT9o3N8w3kNA7cba2r27YD3YSfEIahLCs4fkQ5W_Igv/exec';
+
 
 function buildFallbackReviewUrl(
   formType: string,
@@ -1189,7 +1297,11 @@ async function startServer() {
   });
 }
 
-startServer().catch((err) => {
-  console.error('Failed to start server:', err);
-  process.exit(1);
-});
+if (!process.env.VERCEL) {
+  startServer().catch((err) => {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  });
+}
+
+export default app;

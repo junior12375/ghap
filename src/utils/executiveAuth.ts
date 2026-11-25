@@ -1,8 +1,11 @@
 /**
  * GHACEM Executive Credentials & Authentication Client
- * Communicates with server-side authentication endpoints using in-memory Bearer tokens.
+ * Communicates with server-side authentication endpoints (/api/executive/*)
+ * and falls back to the Google Apps Script backend when running on static hosts.
  * No plaintext passwords or tokens are stored in client source code or browser storage.
  */
+
+import { DEFAULT_SYNC_URL, getSyncUrl } from './syncEngine';
 
 export interface ExecutiveUser {
   id: string;
@@ -64,6 +67,33 @@ async function parseJsonSafe(res: Response): Promise<Record<string, unknown> | n
   }
 }
 
+async function callAppsScriptExecutive(
+  action: string,
+  payload: Record<string, unknown> = {}
+): Promise<Record<string, unknown> | null> {
+  const syncUrl = (getSyncUrl() || DEFAULT_SYNC_URL).trim();
+  if (!syncUrl) return null;
+  try {
+    const res = await fetch(syncUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action, ...payload }),
+      redirect: 'follow',
+    });
+    const text = await res.text();
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    if (parsed && typeof parsed === 'object' && 'ok' in parsed) {
+      if (parsed.ok === false && String(parsed.error || '').startsWith('Unknown action')) {
+        return null;
+      }
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** Check whether at least one executive account or env admin passcode is configured on the server */
 export async function fetchExecutiveAuthStatus(): Promise<ExecutiveAuthStatus> {
   try {
@@ -78,8 +108,19 @@ export async function fetchExecutiveAuthStatus(): Promise<ExecutiveAuthStatus> {
       };
     }
   } catch {
-    // Network unreachable
+    // Try Apps Script fallback
   }
+
+  const remote = await callAppsScriptExecutive('exec_status');
+  if (remote && remote.ok) {
+    return {
+      configured: Boolean(remote.configured),
+      envOverride: false,
+      accountCount: Number(remote.accountCount || 0),
+      backendAvailable: true,
+    };
+  }
+
   return { configured: false, envOverride: false, accountCount: 0, backendAvailable: false };
 }
 
@@ -100,21 +141,30 @@ export async function setupInitialExecutiveAccount(payload: {
       body: JSON.stringify(payload),
     });
     const json = await parseJsonSafe(res);
-    if (!json) {
-      return {
-        success: false,
-        error: 'Executive authentication backend (/api/executive/setup) is not running on this host.',
-      };
+    if (json) {
+      if (res.ok && json.ok && json.token && json.user) {
+        inMemoryBearerToken = String(json.token);
+        inMemoryExecutiveUser = json.user as ExecutiveUser;
+        return { success: true, user: inMemoryExecutiveUser };
+      }
+      return { success: false, error: String(json.error || 'Failed to complete initial executive setup.') };
     }
-    if (res.ok && json.ok && json.token && json.user) {
-      inMemoryBearerToken = String(json.token);
-      inMemoryExecutiveUser = json.user as ExecutiveUser;
-      return { success: true, user: inMemoryExecutiveUser };
-    }
-    return { success: false, error: String(json.error || 'Failed to complete initial executive setup.') };
-  } catch (err) {
-    return { success: false, error: `Network error: ${String(err)}` };
+  } catch {
+    // Fallback to Apps Script
   }
+
+  const remote = await callAppsScriptExecutive('exec_setup', payload);
+  if (remote && remote.ok && remote.user) {
+    inMemoryBearerToken = 'apps-script-session';
+    inMemoryExecutiveUser = remote.user as ExecutiveUser;
+    return { success: true, user: inMemoryExecutiveUser };
+  }
+  return {
+    success: false,
+    error: String(
+      remote?.error || 'Executive authentication backend is not reachable on this host.'
+    ),
+  };
 }
 
 /** Verify username/Work ID + password on the server */
@@ -126,21 +176,32 @@ export async function loginExecutive(username: string, password: string): Promis
       body: JSON.stringify({ username, password }),
     });
     const json = await parseJsonSafe(res);
-    if (!json) {
-      return {
-        success: false,
-        error: 'Executive authentication API (/api/executive/login) is unreachable on this deployment. Deploy with the Node.js server (npm run start) rather than static-only hosting.',
-      };
+    if (json) {
+      if (res.ok && json.ok && json.token && json.user) {
+        inMemoryBearerToken = String(json.token);
+        inMemoryExecutiveUser = json.user as ExecutiveUser;
+        return { success: true, user: inMemoryExecutiveUser };
+      }
+      return { success: false, error: String(json.error || 'Invalid executive username or password.') };
     }
-    if (res.ok && json.ok && json.token && json.user) {
-      inMemoryBearerToken = String(json.token);
-      inMemoryExecutiveUser = json.user as ExecutiveUser;
+  } catch {
+    // Fallback to Apps Script
+  }
+
+  const remote = await callAppsScriptExecutive('exec_login', { username, password });
+  if (remote) {
+    if (remote.ok && remote.user) {
+      inMemoryBearerToken = 'apps-script-session';
+      inMemoryExecutiveUser = remote.user as ExecutiveUser;
       return { success: true, user: inMemoryExecutiveUser };
     }
-    return { success: false, error: String(json.error || 'Invalid executive username or password.') };
-  } catch (err) {
-    return { success: false, error: `Authentication request failed: ${String(err)}` };
+    return { success: false, error: String(remote.error || 'Invalid executive username or password.') };
   }
+
+  return {
+    success: false,
+    error: 'Executive authentication API (/api/executive/login) is unreachable on this deployment.',
+  };
 }
 
 /** Update password for the currently signed-in executive */
@@ -151,17 +212,28 @@ export async function updateExecutivePassword(
   if (!inMemoryBearerToken) {
     return { success: false, error: 'Active executive session required.' };
   }
+  if (inMemoryBearerToken === 'apps-script-session' && inMemoryExecutiveUser) {
+    const remote = await callAppsScriptExecutive('exec_change_password', {
+      username: inMemoryExecutiveUser.username,
+      currentPassword,
+      newPassword,
+    });
+    if (remote && remote.ok) {
+      return { success: true, message: String(remote.message || 'Password updated successfully.') };
+    }
+    return { success: false, error: String(remote?.error || 'Failed to update password.') };
+  }
   try {
     const res = await fetch('/api/executive/change-password', {
       method: 'POST',
       headers: authHeaders(),
       body: JSON.stringify({ currentPassword, newPassword }),
     });
-    const json = await res.json();
-    if (res.ok && json.ok) {
-      return { success: true, message: json.message || 'Password updated successfully.' };
+    const json = await parseJsonSafe(res);
+    if (res.ok && json && json.ok) {
+      return { success: true, message: String(json.message || 'Password updated successfully.') };
     }
-    return { success: false, error: json.error || 'Failed to update password.' };
+    return { success: false, error: String(json?.error || 'Failed to update password.') };
   } catch (err) {
     return { success: false, error: `Network error: ${String(err)}` };
   }
@@ -170,12 +242,18 @@ export async function updateExecutivePassword(
 /** Fetch sanitized list of executive accounts (requires valid Bearer token) */
 export async function fetchExecutiveAccounts(): Promise<ExecutiveUser[]> {
   if (!inMemoryBearerToken) return [];
+  if (inMemoryBearerToken === 'apps-script-session') {
+    const remote = await callAppsScriptExecutive('exec_accounts');
+    return remote && remote.ok && Array.isArray(remote.accounts)
+      ? (remote.accounts as ExecutiveUser[])
+      : [];
+  }
   try {
     const res = await fetch('/api/executive/accounts', {
       headers: authHeaders(),
     });
-    const json = await res.json();
-    if (res.ok && json.ok && Array.isArray(json.accounts)) {
+    const json = await parseJsonSafe(res);
+    if (res.ok && json && json.ok && Array.isArray(json.accounts)) {
       return json.accounts as ExecutiveUser[];
     }
   } catch {
@@ -198,17 +276,24 @@ export async function createExecutiveAccount(payload: {
   if (!inMemoryBearerToken) {
     return { success: false, error: 'Active executive session required.' };
   }
+  if (inMemoryBearerToken === 'apps-script-session') {
+    const remote = await callAppsScriptExecutive('exec_create', payload);
+    if (remote && remote.ok && remote.account) {
+      return { success: true, user: remote.account as ExecutiveUser };
+    }
+    return { success: false, error: String(remote?.error || 'Failed to provision executive account.') };
+  }
   try {
     const res = await fetch('/api/executive/accounts', {
       method: 'POST',
       headers: authHeaders(),
       body: JSON.stringify(payload),
     });
-    const json = await res.json();
-    if (res.ok && json.ok && json.account) {
+    const json = await parseJsonSafe(res);
+    if (res.ok && json && json.ok && json.account) {
       return { success: true, user: json.account as ExecutiveUser };
     }
-    return { success: false, error: json.error || 'Failed to provision executive account.' };
+    return { success: false, error: String(json?.error || 'Failed to provision executive account.') };
   } catch (err) {
     return { success: false, error: `Network error: ${String(err)}` };
   }

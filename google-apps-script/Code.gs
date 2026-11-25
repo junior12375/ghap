@@ -119,6 +119,10 @@ function doPost(e) {
       });
     }
 
+    if (action.indexOf('exec_') === 0) {
+      return createJsonResponse(handleExecutiveAction(action, payload));
+    }
+
     const submissionId = payload.submissionId || ('GHAC-' + Date.now());
     const incomingData = payload.data || {};
 
@@ -1070,3 +1074,187 @@ function renderEhsGasTestPage(formType, submissionId, workOrder) {
     .setTitle('GHACPerm · EHS Gas Test (' + resolvedId + ')')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
+
+// ============================================================================
+// Persistent Executive Account Store (PropertiesService + Salted SHA-256)
+// ============================================================================
+var EXEC_ACCOUNTS_PROP_KEY = 'GHACEM_EXEC_ACCOUNTS_JSON';
+
+function execSha256Hex(input) {
+  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(input || ''), Utilities.Charset.UTF_8);
+  return bytes
+    .map(function (b) {
+      var v = b < 0 ? b + 256 : b;
+      return ('0' + v.toString(16)).slice(-2);
+    })
+    .join('');
+}
+
+function execHashPassword(password, salt) {
+  var actualSalt = salt || Utilities.getUuid().replace(/-/g, '');
+  var current = actualSalt + ':' + String(password || '');
+  for (var i = 0; i < 50; i++) {
+    current = execSha256Hex(actualSalt + ':' + current);
+  }
+  return { salt: actualSalt, hash: current };
+}
+
+function loadExecAccounts() {
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty(EXEC_ACCOUNTS_PROP_KEY);
+    if (!raw) return [];
+    var parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    return [];
+  }
+}
+
+function saveExecAccounts(list) {
+  PropertiesService.getScriptProperties().setProperty(EXEC_ACCOUNTS_PROP_KEY, JSON.stringify(list || []));
+}
+
+function sanitizeExecAccount(acc) {
+  return {
+    id: acc.id,
+    username: acc.username,
+    fullName: acc.fullName,
+    role: acc.role,
+    department: acc.department,
+    facility: acc.facility,
+    workId: acc.workId,
+    clearanceLevel: acc.clearanceLevel
+  };
+}
+
+function handleExecutiveAction(action, payload) {
+  var accounts = loadExecAccounts();
+
+  if (action === 'exec_status') {
+    return {
+      ok: true,
+      configured: accounts.length > 0,
+      envOverride: false,
+      accountCount: accounts.length
+    };
+  }
+
+  if (action === 'exec_setup') {
+    if (accounts.length > 0) {
+      return { ok: false, error: 'Executive access is already configured. Please sign in.' };
+    }
+    var username = String(payload.username || '').trim().toLowerCase();
+    var password = String(payload.password || '');
+    var fullName = String(payload.fullName || '').trim();
+    var workId = String(payload.workId || 'GH-EHS-01').trim().toUpperCase();
+    if (!username || username.length < 3) {
+      return { ok: false, error: 'Username must be at least 3 characters.' };
+    }
+    if (!fullName) {
+      return { ok: false, error: 'Full name is required.' };
+    }
+    if (password.length < 8) {
+      return { ok: false, error: 'Password must be at least 8 characters long.' };
+    }
+    var hashed = execHashPassword(password);
+    var firstAcc = {
+      id: 'exec-' + Utilities.getUuid(),
+      username: username,
+      passwordSalt: hashed.salt,
+      passwordHash: hashed.hash,
+      fullName: fullName,
+      role: String(payload.role || 'Corporate EHS Director').trim() || 'Corporate EHS Director',
+      department: String(payload.department || 'Health, Safety & Environment').trim() || 'Health, Safety & Environment',
+      facility: String(payload.facility || 'All GHACEM Facilities'),
+      workId: workId,
+      clearanceLevel: 'Level 3 - Director & Executive'
+    };
+    accounts.push(firstAcc);
+    saveExecAccounts(accounts);
+    return { ok: true, user: sanitizeExecAccount(firstAcc) };
+  }
+
+  if (action === 'exec_login') {
+    var uname = String(payload.username || '').trim().toLowerCase();
+    var pwd = String(payload.password || '');
+    if (!uname || !pwd) {
+      return { ok: false, error: 'Username/Work ID and password are required.' };
+    }
+    for (var i = 0; i < accounts.length; i++) {
+      var a = accounts[i];
+      if (String(a.username || '').toLowerCase() === uname || String(a.workId || '').toLowerCase() === uname) {
+        var check = execHashPassword(pwd, a.passwordSalt);
+        if (check.hash === a.passwordHash) {
+          return { ok: true, user: sanitizeExecAccount(a) };
+        }
+        return { ok: false, error: 'Invalid executive username or password.' };
+      }
+    }
+    return { ok: false, error: 'Invalid executive username or password.' };
+  }
+
+  if (action === 'exec_change_password') {
+    var targetUsername = String(payload.username || '').trim().toLowerCase();
+    var curPwd = String(payload.currentPassword || '');
+    var newPwd = String(payload.newPassword || '');
+    if (!curPwd || newPwd.length < 8) {
+      return { ok: false, error: 'Current password and new password (min 8 chars) are required.' };
+    }
+    for (var j = 0; j < accounts.length; j++) {
+      var item = accounts[j];
+      if (String(item.username || '').toLowerCase() === targetUsername) {
+        var verify = execHashPassword(curPwd, item.passwordSalt);
+        if (verify.hash !== item.passwordHash) {
+          return { ok: false, error: 'Current password does not match our records.' };
+        }
+        var updated = execHashPassword(newPwd);
+        item.passwordSalt = updated.salt;
+        item.passwordHash = updated.hash;
+        saveExecAccounts(accounts);
+        return { ok: true, message: 'Password updated successfully.' };
+      }
+    }
+    return { ok: false, error: 'Executive account not found.' };
+  }
+
+  if (action === 'exec_accounts') {
+    return { ok: true, accounts: accounts.map(sanitizeExecAccount) };
+  }
+
+  if (action === 'exec_create') {
+    var newUname = String(payload.username || '').trim().toLowerCase();
+    var newWorkId = String(payload.workId || '').trim().toUpperCase();
+    var newPass = String(payload.password || '');
+    var newFull = String(payload.fullName || '').trim();
+    if (!newUname || !newFull || !newWorkId || newPass.length < 8) {
+      return { ok: false, error: 'Valid username, full name, Work ID, and password (min 8 chars) are required.' };
+    }
+    for (var k = 0; k < accounts.length; k++) {
+      if (
+        String(accounts[k].username || '').toLowerCase() === newUname ||
+        String(accounts[k].workId || '').toLowerCase() === newWorkId.toLowerCase()
+      ) {
+        return { ok: false, conflict: true, error: 'An executive account with that username or Work ID already exists.' };
+      }
+    }
+    var createdHash = execHashPassword(newPass);
+    var createdAcc = {
+      id: 'exec-' + Utilities.getUuid(),
+      username: newUname,
+      passwordSalt: createdHash.salt,
+      passwordHash: createdHash.hash,
+      fullName: newFull,
+      role: String(payload.role || 'Safety Operations Lead').trim(),
+      department: String(payload.department || 'EHS & Operations').trim(),
+      facility: String(payload.facility || 'All GHACEM Facilities'),
+      workId: newWorkId,
+      clearanceLevel: String(payload.clearanceLevel || 'Level 2 - Plant Lead')
+    };
+    accounts.push(createdAcc);
+    saveExecAccounts(accounts);
+    return { ok: true, account: sanitizeExecAccount(createdAcc) };
+  }
+
+  return { ok: false, error: 'Unknown executive action: ' + action };
+}
+
