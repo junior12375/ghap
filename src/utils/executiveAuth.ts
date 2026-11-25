@@ -67,6 +67,8 @@ async function parseJsonSafe(res: Response): Promise<Record<string, unknown> | n
   }
 }
 
+let remoteExecReadyCache: { checkedAt: number; ready: boolean } | null = null;
+
 async function callAppsScriptExecutive(
   action: string,
   payload: Record<string, unknown> = {}
@@ -74,6 +76,25 @@ async function callAppsScriptExecutive(
   const syncUrl = (getSyncUrl() || DEFAULT_SYNC_URL).trim();
   if (!syncUrl) return null;
   try {
+    if (action === 'exec_status') {
+      const res = await fetch(`${syncUrl}?mode=exec_status&_t=${Date.now()}`, {
+        method: 'GET',
+        redirect: 'follow',
+      });
+      const text = await res.text();
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      const ready = Boolean(parsed && parsed.execStoreReady);
+      remoteExecReadyCache = { checkedAt: Date.now(), ready };
+      return ready ? parsed : null;
+    }
+
+    if (!remoteExecReadyCache || Date.now() - remoteExecReadyCache.checkedAt > 60_000) {
+      await callAppsScriptExecutive('exec_status');
+    }
+    if (!remoteExecReadyCache?.ready) {
+      return null;
+    }
+
     const res = await fetch(syncUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },

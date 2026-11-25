@@ -35,6 +35,12 @@ function doGet(e) {
       );
     }
 
+    if (mode === 'exec_status') {
+      var execStatus = handleExecutiveAction('exec_status', {});
+      execStatus.execStoreReady = true;
+      return createJsonResponse(execStatus);
+    }
+
     if (mode === 'review' || (!mode && params && params.permit && params.id)) {
       return renderPermitReviewPage(
         formType,
@@ -221,9 +227,9 @@ function doPost(e) {
       sheet.appendRow(rowValues);
     }
 
-    // Automatic background email dispatch (unless already delivered by Express server)
+    // Automatic background email dispatch (unless already delivered by Express server or replayed from outbox)
     let emailDispatched = false;
-    if (!payload.skipAppsScriptEmail) {
+    if (!payload.skipAppsScriptEmail && !payload.isOutboxReplay) {
       emailDispatched = dispatchAutomaticEmail(action, formType, submissionId, mergedRecord, hodFieldCode);
     }
 

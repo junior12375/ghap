@@ -659,6 +659,12 @@ export default function App() {
     const supervisorWorkId = h.safeCommenceMgr?.workId || '';
     const supervisorName = h.safeCommenceMgr?.name || '';
 
+    if (!h.workOrderNumber.trim() || !h.location.trim()) {
+      setNotifyStatusMessage('⚠️ Enter Work Order Number and Location first before notifying EHS.');
+      showToast('Enter Work Order Number and Location first.');
+      return;
+    }
+
     if (!supervisorWorkId) {
       setNotifyStatusMessage('🔒 Enter the Site Supervisor Work ID in Section 16 first.');
       showToast('Enter Site Supervisor Work ID first.');

@@ -103,6 +103,8 @@ function savePersistedExecutiveAccounts(accounts: ServerExecutiveAccount[]): voi
 
 const executiveAccounts: ServerExecutiveAccount[] = loadPersistedExecutiveAccounts();
 
+let remoteExecReadyCache: { checkedAt: number; ready: boolean } | null = null;
+
 async function callAppsScriptExec(
   action: string,
   payload: Record<string, unknown> = {}
@@ -112,6 +114,26 @@ async function callAppsScriptExec(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 6000);
   try {
+    if (action === 'exec_status') {
+      const resp = await fetch(`${syncUrl}?mode=exec_status&_t=${Date.now()}`, {
+        method: 'GET',
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+      const text = await resp.text();
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      const ready = Boolean(parsed && parsed.execStoreReady);
+      remoteExecReadyCache = { checkedAt: Date.now(), ready };
+      return ready ? parsed : null;
+    }
+
+    if (!remoteExecReadyCache || Date.now() - remoteExecReadyCache.checkedAt > 60_000) {
+      await callAppsScriptExec('exec_status');
+    }
+    if (!remoteExecReadyCache?.ready) {
+      return null;
+    }
+
     const resp = await fetch(syncUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },

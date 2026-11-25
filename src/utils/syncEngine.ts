@@ -107,15 +107,22 @@ export function saveOutboxQueue(queue: OutboxItem[]): void {
 
 export async function addToOutbox(item: Omit<OutboxItem, 'id' | 'createdAt' | 'retryCount' | 'integrityHash'>): Promise<OutboxItem> {
   const hash = await computeSha256Digest(item.data);
+  const queue = getOutboxQueue();
+  const existingIdx = queue.findIndex(
+    (q) => q.submissionId === item.submissionId && q.action === item.action
+  );
   const outboxItem: OutboxItem = {
     ...item,
-    id: UtilitiesUuid(),
+    id: existingIdx !== -1 ? queue[existingIdx].id : UtilitiesUuid(),
     createdAt: Date.now(),
     retryCount: 0,
     integrityHash: hash,
   };
-  const queue = getOutboxQueue();
-  queue.push(outboxItem);
+  if (existingIdx !== -1) {
+    queue[existingIdx] = outboxItem;
+  } else {
+    queue.push(outboxItem);
+  }
   saveOutboxQueue(queue);
   return outboxItem;
 }
@@ -187,11 +194,19 @@ export async function fetchHistoryFromBackend(formType: PermitType): Promise<{ o
 }
 
 /**
- * Process any pending outbox queue items
+ * Process any pending outbox queue items silently (never sends duplicate/unsolicited emails on page load)
  */
 export async function flushOutboxQueue(onProgress?: (info: SyncStatusInfo) => void): Promise<{ processed: number; errors: number }> {
-  const queue = getOutboxQueue();
-  if (queue.length === 0) return { processed: 0, errors: 0 };
+  const MAX_OUTBOX_AGE_MS = 24 * 60 * 60 * 1000;
+  const MAX_RETRIES = 3;
+  const now = Date.now();
+  const queue = getOutboxQueue().filter(
+    (item) => item && now - (item.createdAt || 0) <= MAX_OUTBOX_AGE_MS && (item.retryCount || 0) < MAX_RETRIES
+  );
+  if (queue.length === 0) {
+    saveOutboxQueue([]);
+    return { processed: 0, errors: 0 };
+  }
 
   let processed = 0;
   let errors = 0;
@@ -211,6 +226,8 @@ export async function flushOutboxQueue(onProgress?: (info: SyncStatusInfo) => vo
         formType: item.formType,
         action: item.action,
         submissionId: item.submissionId,
+        skipAppsScriptEmail: true,
+        isOutboxReplay: true,
         data: item.data,
       });
 
@@ -218,13 +235,17 @@ export async function flushOutboxQueue(onProgress?: (info: SyncStatusInfo) => vo
         processed++;
       } else {
         errors++;
-        item.retryCount += 1;
-        remaining.push(item);
+        item.retryCount = (item.retryCount || 0) + 1;
+        if (item.retryCount < MAX_RETRIES) {
+          remaining.push(item);
+        }
       }
     } catch {
       errors++;
-      item.retryCount += 1;
-      remaining.push(item);
+      item.retryCount = (item.retryCount || 0) + 1;
+      if (item.retryCount < MAX_RETRIES) {
+        remaining.push(item);
+      }
     }
   }
 
