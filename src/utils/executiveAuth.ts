@@ -20,6 +20,7 @@ export interface ExecutiveAuthStatus {
   configured: boolean;
   envOverride: boolean;
   accountCount: number;
+  backendAvailable: boolean;
 }
 
 export interface ExecutiveAuthResult {
@@ -53,22 +54,33 @@ function authHeaders(): Record<string, string> {
   return headers;
 }
 
+async function parseJsonSafe(res: Response): Promise<Record<string, unknown> | null> {
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) return null;
+  try {
+    return (await res.json()) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 /** Check whether at least one executive account or env admin passcode is configured on the server */
 export async function fetchExecutiveAuthStatus(): Promise<ExecutiveAuthStatus> {
   try {
     const res = await fetch('/api/executive/status');
-    const json = await res.json();
-    if (res.ok && json.ok) {
+    const json = await parseJsonSafe(res);
+    if (res.ok && json && json.ok) {
       return {
         configured: Boolean(json.configured),
         envOverride: Boolean(json.envOverride),
         accountCount: Number(json.accountCount || 0),
+        backendAvailable: true,
       };
     }
   } catch {
     // Network unreachable
   }
-  return { configured: true, envOverride: false, accountCount: 0 };
+  return { configured: false, envOverride: false, accountCount: 0, backendAvailable: false };
 }
 
 /** One-time first-run setup when no executive credentials exist on the server yet */
@@ -87,13 +99,19 @@ export async function setupInitialExecutiveAccount(payload: {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    const json = await res.json();
+    const json = await parseJsonSafe(res);
+    if (!json) {
+      return {
+        success: false,
+        error: 'Executive authentication backend (/api/executive/setup) is not running on this host.',
+      };
+    }
     if (res.ok && json.ok && json.token && json.user) {
       inMemoryBearerToken = String(json.token);
       inMemoryExecutiveUser = json.user as ExecutiveUser;
       return { success: true, user: inMemoryExecutiveUser };
     }
-    return { success: false, error: json.error || 'Failed to complete initial executive setup.' };
+    return { success: false, error: String(json.error || 'Failed to complete initial executive setup.') };
   } catch (err) {
     return { success: false, error: `Network error: ${String(err)}` };
   }
@@ -107,13 +125,19 @@ export async function loginExecutive(username: string, password: string): Promis
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
     });
-    const json = await res.json();
+    const json = await parseJsonSafe(res);
+    if (!json) {
+      return {
+        success: false,
+        error: 'Executive authentication API (/api/executive/login) is unreachable on this deployment. Deploy with the Node.js server (npm run start) rather than static-only hosting.',
+      };
+    }
     if (res.ok && json.ok && json.token && json.user) {
       inMemoryBearerToken = String(json.token);
       inMemoryExecutiveUser = json.user as ExecutiveUser;
       return { success: true, user: inMemoryExecutiveUser };
     }
-    return { success: false, error: json.error || 'Invalid executive username or password.' };
+    return { success: false, error: String(json.error || 'Invalid executive username or password.') };
   } catch (err) {
     return { success: false, error: `Authentication request failed: ${String(err)}` };
   }

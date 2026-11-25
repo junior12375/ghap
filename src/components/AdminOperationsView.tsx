@@ -62,6 +62,8 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
 }) => {
   // Server Auth Configuration Status
   const [authConfigured, setAuthConfigured] = useState<boolean>(true);
+  const [backendAvailable, setBackendAvailable] = useState<boolean>(true);
+  const [envOverrideActive, setEnvOverrideActive] = useState<boolean>(false);
   const [statusLoading, setStatusLoading] = useState<boolean>(true);
 
   // Login State
@@ -119,6 +121,8 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
       fetchExecutiveAuthStatus()
         .then((st) => {
           setAuthConfigured(st.configured);
+          setBackendAvailable(st.backendAvailable);
+          setEnvOverrideActive(st.envOverride);
         })
         .finally(() => {
           setStatusLoading(false);
@@ -376,11 +380,19 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
                 ISO 45001 EHS GOVERNANCE
               </div>
               <h2 className="font-display font-black text-2xl text-[var(--color-text-main)] tracking-tight">
-                {!statusLoading && !authConfigured ? 'Claim Executive Console Access' : 'Executive Operations Login'}
+                {!statusLoading && !backendAvailable
+                  ? 'Backend Required for Executive Login'
+                  : !statusLoading && !authConfigured
+                  ? 'Claim Executive Console Access'
+                  : 'Executive Operations Login'}
               </h2>
               <p className="text-xs text-[var(--color-text-muted)] max-w-sm mx-auto leading-relaxed mt-1">
-                {!statusLoading && !authConfigured
+                {!statusLoading && !backendAvailable
+                  ? 'This deployment is serving static frontend files without the Express API server (/api/executive/*).'
+                  : !statusLoading && !authConfigured
                   ? 'No executive administrator has been claimed yet. Create the primary Director/EHS executive account to secure this portal.'
+                  : envOverrideActive
+                  ? 'Use username admin (or Work ID GH-ADMIN-00) with your configured EXECUTIVE_ADMIN_PASSWORD, or your provisioned executive account.'
                   : 'Authorized Plant Leadership, EHS Directors, and Governance Officers must provide verified username and password credentials.'}
               </p>
             </div>
@@ -389,6 +401,19 @@ export const AdminOperationsView: React.FC<AdminOperationsViewProps> = ({
           {statusLoading ? (
             <div className="py-8 text-center text-xs text-[var(--color-text-muted)] font-mono">
               Verifying executive authentication status...
+            </div>
+          ) : !backendAvailable ? (
+            <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-xs text-amber-700 dark:text-amber-300 space-y-2">
+              <div className="font-bold flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
+                <span>Executive Authentication Server Offline</span>
+              </div>
+              <p className="leading-relaxed">
+                Executive login verifies credentials on the Node.js backend (<span className="font-mono">/api/executive/*</span>). Static-only hosts (such as GitHub Pages) do not run <span className="font-mono">server.ts</span>, so executive sign-in cannot verify credentials there.
+              </p>
+              <p className="leading-relaxed">
+                Deploy the full-stack server (<span className="font-mono">npm run build</span> + <span className="font-mono">npm run start</span>) on Cloud Run / AI Studio Deploy to unlock the Executive Console.
+              </p>
             </div>
           ) : !authConfigured ? (
             <form onSubmit={handleSetupSubmit} className="space-y-3.5">

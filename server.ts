@@ -74,7 +74,29 @@ export interface ServerExecutiveAccount {
 
 export type PublicExecutiveUser = Omit<ServerExecutiveAccount, 'passwordSalt' | 'passwordHash'>;
 
-const executiveAccounts: ServerExecutiveAccount[] = [];
+const ACCOUNTS_STORE_PATH = path.resolve('.executive-accounts.json');
+
+function loadPersistedExecutiveAccounts(): ServerExecutiveAccount[] {
+  try {
+    if (!fs.existsSync(ACCOUNTS_STORE_PATH)) return [];
+    const raw = fs.readFileSync(ACCOUNTS_STORE_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as ServerExecutiveAccount[]) : [];
+  } catch (err) {
+    console.warn('Could not load persisted executive accounts:', err);
+    return [];
+  }
+}
+
+function savePersistedExecutiveAccounts(accounts: ServerExecutiveAccount[]): void {
+  try {
+    fs.writeFileSync(ACCOUNTS_STORE_PATH, JSON.stringify(accounts, null, 2), 'utf8');
+  } catch (err) {
+    console.warn('Could not persist executive accounts to disk:', err);
+  }
+}
+
+const executiveAccounts: ServerExecutiveAccount[] = loadPersistedExecutiveAccounts();
 
 function hashPassword(password: string, saltHex?: string): { saltHex: string; hashHex: string } {
   const salt = saltHex || crypto.randomBytes(16).toString('hex');
@@ -244,6 +266,7 @@ app.post('/api/executive/setup', (req: Request, res: Response) => {
   };
 
   executiveAccounts.push(newAccount);
+  savePersistedExecutiveAccounts(executiveAccounts);
   const publicUser = sanitizeUser(newAccount);
   const token = signSessionToken(publicUser);
 
@@ -326,6 +349,7 @@ app.post('/api/executive/change-password', requireExecutiveAuth, (req: Authentic
   const { saltHex, hashHex } = hashPassword(newPassword);
   account.passwordSalt = saltHex;
   account.passwordHash = hashHex;
+  savePersistedExecutiveAccounts(executiveAccounts);
 
   return res.json({ ok: true, message: 'Password updated successfully.' });
 });
@@ -393,6 +417,7 @@ app.post('/api/executive/accounts', requireExecutiveAuth, (req: AuthenticatedReq
     clearanceLevel,
   };
   executiveAccounts.push(created);
+  savePersistedExecutiveAccounts(executiveAccounts);
   return res.status(201).json({ ok: true, account: sanitizeUser(created) });
 });
 
